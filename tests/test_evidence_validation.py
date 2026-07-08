@@ -1,5 +1,6 @@
 import pytest
-from nodes import evidence_validation_node
+from agent.nodes import evidence_validation_node
+from agent.models import IncidentState
 
 def test_evidence_validation_success():
     state = {
@@ -43,3 +44,13 @@ def test_evidence_validation_mismatch():
     assert len(res["validated_evidence"]) == 0
     assert len(res["rejected_evidence"]) == 1
     assert res["triage_verdict"] == "needs_review"
+
+def test_evidence_validation_false_positive_missing_evidence():
+    state = {
+        "incident_id": "TEST-01",
+        "triage_verdict": "false_positive",
+        "raw_logs": [{"event_id": "1", "raw_message": "This is a benign string"}],
+        "evidence": []
+    }
+    res = evidence_validation_node(state)
+    assert res.get("triage_verdict") == "needs_review"

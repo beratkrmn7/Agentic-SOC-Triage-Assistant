@@ -4,8 +4,8 @@ from typing import List, Dict, Any, Optional
 import json
 import uvicorn
 
-# Import the pre-compiled graph from graph.py
-from graph import app as agent_app
+# Import the pre-compiled graph from agent.graph
+from agent.graph import app as agent_app
 
 app = FastAPI(
     title="Agentic SOC Triage Assistant",
@@ -46,7 +46,6 @@ def analyze_incident(req: AnalyzeRequest):
         "raw_logs": processed_logs, 
         "messages": [],
         "iteration_count": 0,
-        "strategy": "",
         "mitre_techniques": [],
         "candidate_evidence": [],
         "detected_signals": [],

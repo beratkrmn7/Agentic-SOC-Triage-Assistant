@@ -5,9 +5,12 @@ from typing import Annotated, Literal, List, Dict, Any
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 from pydantic import BaseModel, Field
+import ipaddress
 
 # We import EvidenceItem and TriageResult to keep schemas DRY
-from models import EvidenceItem, TriageResult
+from agent.models import EvidenceItem, TriageResult
+
+MAX_EVIDENCE_PER_DETECTOR = 5
 
 def parse_time(ts_str: str) -> datetime:
     try:
@@ -19,14 +22,23 @@ def parse_time(ts_str: str) -> datetime:
 
 def format_detection_result(detector_name: str, title: str, matched_logs: list, is_benign: bool = False, custom_msg: str = "") -> dict:
     if not matched_logs:
-        return {"detector_name": detector_name, "status": "clean", "message": f"No {title} patterns detected."}
+        return {
+            "detector_name": detector_name, 
+            "status": "clean", 
+            "message": f"No {title} patterns detected.",
+            "matched_count": 0,
+            "matched_event_ids": [],
+            "candidate_evidence": [],
+            "logs": []
+        }
     
     status = "benign" if is_benign else "alert"
     prefix = "INFO:" if is_benign else "CRITICAL:"
-    msg = custom_msg if custom_msg else f"{prefix} {title} pattern detected in {len(matched_logs)} logs."
+    matched_count = len(matched_logs)
+    msg = custom_msg if custom_msg else f"{prefix} {title} pattern detected in {matched_count} logs."
     
     candidate_evidence = []
-    for log in matched_logs:
+    for log in matched_logs[:MAX_EVIDENCE_PER_DETECTOR]:
         raw_msg = log.get("raw_message", "")
         if not raw_msg:
             # Fallback to a stringified subset of the JSON if raw_message is missing
@@ -44,6 +56,7 @@ def format_detection_result(detector_name: str, title: str, matched_logs: list, 
         "detector_name": detector_name,
         "status": status,
         "message": msg,
+        "matched_count": matched_count,
         "matched_event_ids": [log.get("event_id", "unknown") for log in matched_logs],
         "candidate_evidence": candidate_evidence,
         "logs": matched_logs
@@ -142,11 +155,34 @@ def detect_bruteforce_pattern(raw_logs: list) -> dict:
     return format_detection_result("detect_bruteforce_pattern", "Brute Force", list(unique_matched))
 
 def detect_failed_then_success_login(raw_logs: list) -> dict:
-    failed = [log for log in raw_logs if "failed" in json.dumps(log).lower()]
-    success = [log for log in raw_logs if "accepted" in json.dumps(log).lower() or "200 ok - user=" in json.dumps(log).lower()]
-    if failed and success:
-        return format_detection_result("detect_failed_then_success_login", "Failed then Success Login", failed + success)
-    return format_detection_result("detect_failed_then_success_login", "Failed then Success Login", [])
+    logins = [log for log in raw_logs if "failed" in json.dumps(log).lower() or "accepted" in json.dumps(log).lower() or "200 ok - user=" in json.dumps(log).lower()]
+    logins.sort(key=lambda x: parse_time(x.get("timestamp", "")))
+    
+    groups = {}
+    for log in logins:
+        key = (log.get("src_ip"), log.get("dst_ip"))
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(log)
+        
+    matched = []
+    for key, logs in groups.items():
+        failed_logs = []
+        for log in logs:
+            msg = json.dumps(log).lower()
+            if "failed" in msg:
+                failed_logs.append(log)
+            elif ("accepted" in msg or "200 ok - user=" in msg) and failed_logs:
+                # Check time window
+                t_success = parse_time(log.get("timestamp", ""))
+                t_last_fail = parse_time(failed_logs[-1].get("timestamp", ""))
+                if t_success - t_last_fail <= timedelta(minutes=5):
+                    matched.extend(failed_logs)
+                    matched.append(log)
+                failed_logs = [] # Reset after success
+            
+    unique_matched = {m.get("event_id"): m for m in matched}.values()
+    return format_detection_result("detect_failed_then_success_login", "Failed then Success Login", list(unique_matched))
 
 def detect_port_scan_pattern(raw_logs: list) -> dict:
     blocks = [log for log in raw_logs if "BLOCK TCP" in json.dumps(log).upper()]
@@ -221,24 +257,77 @@ def detect_backup_false_positive(raw_logs: list) -> dict:
     return format_detection_result("detect_backup_false_positive", "Backup Agent", backup, is_benign=True, custom_msg="Known backup agent activity detected.")
 
 def detect_benign_web_traffic(raw_logs: list) -> dict:
-    # Must only contain HTTP_GET, HTTP_POST
     event_types = set([log.get("event_type") for log in raw_logs])
-    if not event_types.issubset({"HTTP_GET", "HTTP_POST"}):
+    if not event_types.issubset({"HTTP_GET", "HTTP_POST", None}):
         return format_detection_result("detect_benign_web_traffic", "Benign Web Traffic", [])
         
-    # Must be 200 OK
-    web_logs = [log for log in raw_logs if "200 ok" in json.dumps(log).lower() and ("index.html" in json.dumps(log).lower() or "images" in json.dumps(log).lower())]
+    malicious_patterns = [r"(?i)\bOR\b\s+['\"]?\d['\"]?\s*=\s*['\"]?\d", r"(?i)DROP\s+TABLE", r"(?i)UNION\s+SELECT", r"(?i)<script>", r"(?i)onerror=", r"(?i)javascript:"]
+    allowed_endpoints = [r"GET /$", r"GET /index\.html", r"GET /home", r"GET /dashboard", r"GET /favicon\.ico", r"GET /images/", r"GET /styles\.css", r"GET /api/profile"]
+    
+    web_logs = []
+    for log in raw_logs:
+        if log.get("event_type") not in ("HTTP_GET", "HTTP_POST"):
+            continue
+        msg = json.dumps(log)
+        
+        # Check malicious patterns
+        if any(re.search(p, msg) for p in malicious_patterns):
+            continue
+            
+        # Check status code (allow only 2xx)
+        if "200 ok" not in msg.lower() and not re.search(r"HTTP/1.[01] 20[0-9]", msg):
+            continue
+            
+        # If it has a bad status code, reject
+        if re.search(r"HTTP/1.[01] (401|403|500|404)", msg):
+            continue
+            
+        # Allow standard endpoints
+        if any(re.search(p, msg) for p in allowed_endpoints):
+            web_logs.append(log)
+            
     if web_logs:
         return format_detection_result("detect_benign_web_traffic", "Benign Web Traffic", web_logs, is_benign=True, custom_msg="Standard benign web traffic detected.")
     return format_detection_result("detect_benign_web_traffic", "Benign Web Traffic", [])
 
+def is_private_ip(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
+
 def detect_normal_admin_login(raw_logs: list) -> dict:
-    # Look for successful admin logins (e.g. 200 OK - user=admin_real followed by dashboard access)
-    admin_login = [log for log in raw_logs if "user=admin" in json.dumps(log).lower() and "200 ok" in json.dumps(log).lower()]
-    dashboard_access = [log for log in raw_logs if "dashboard" in json.dumps(log).lower() and "200 ok" in json.dumps(log).lower()]
+    malicious_patterns = [r"(?i)\bOR\b\s+['\"]?\d['\"]?\s*=\s*['\"]?\d", r"(?i)DROP\s+TABLE", r"(?i)UNION\s+SELECT", r"(?i)<script>", r"(?i)onerror="]
     
-    if admin_login and dashboard_access:
-        return format_detection_result("detect_normal_admin_login", "Normal Admin Login", admin_login + dashboard_access, is_benign=True, custom_msg="Normal administrative login detected.")
+    admin_logins = []
+    dash_accesses = []
+    
+    for log in raw_logs:
+        msg = json.dumps(log).lower()
+        if any(re.search(p, json.dumps(log)) for p in malicious_patterns):
+            continue
+            
+        if "post /login" in msg and "user=admin" in msg and "200 ok" in msg:
+            if is_private_ip(log.get("src_ip", "")):
+                admin_logins.append(log)
+        elif "get /dashboard" in msg and "200 ok" in msg:
+            if is_private_ip(log.get("src_ip", "")):
+                dash_accesses.append(log)
+                
+    matched = []
+    for login in admin_logins:
+        src_ip = login.get("src_ip")
+        t_login = parse_time(login.get("timestamp", ""))
+        
+        for dash in dash_accesses:
+            if dash.get("src_ip") == src_ip:
+                t_dash = parse_time(dash.get("timestamp", ""))
+                if timedelta(seconds=0) <= (t_dash - t_login) <= timedelta(minutes=10):
+                    matched.extend([login, dash])
+                    
+    if matched:
+        unique_matched = {m.get("event_id"): m for m in matched}.values()
+        return format_detection_result("detect_normal_admin_login", "Normal Admin Login", list(unique_matched), is_benign=True, custom_msg="Normal administrative login detected.")
     return format_detection_result("detect_normal_admin_login", "Normal Admin Login", [])
 
 # The only tools exposed to the LLM

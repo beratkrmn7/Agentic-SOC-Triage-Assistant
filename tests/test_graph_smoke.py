@@ -1,11 +1,11 @@
 import pytest
-from graph import app
+from agent.graph import app
 import os
 import json
 
 @pytest.mark.skipif(not os.environ.get("GROQ_API_KEY"), reason="Requires GROQ API Key")
 def test_graph_smoke():
-    with open("mock_logs.json", "r") as f:
+    with open("data/mock_logs.json", "r") as f:
         mock_data = json.load(f)
         
     incident = mock_data[0] # INC-001 Standard Web Traffic

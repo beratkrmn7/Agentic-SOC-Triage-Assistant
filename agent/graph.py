@@ -5,9 +5,9 @@ import ast
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
-from models import IncidentState
-from tools import tools_list
-from nodes import (
+from agent.models import IncidentState
+from agent.tools import tools_list
+from agent.nodes import (
     entity_extraction_node,
     automated_detection_node,
     triage_node, 
@@ -21,7 +21,15 @@ from nodes import (
 
 class CustomToolNode(ToolNode):
     def invoke(self, input_val, config=None, **kwargs):
+        tool_calls_map = {}
+        if isinstance(input_val, dict) and "messages" in input_val:
+            last_msg = input_val["messages"][-1]
+            if hasattr(last_msg, "tool_calls"):
+                for tc in last_msg.tool_calls:
+                    tool_calls_map[tc["id"]] = tc["args"]
+                    
         result = super().invoke(input_val, config, **kwargs)
+        
         tool_results = []
         search_history = []
         if "messages" in result:
@@ -30,21 +38,27 @@ class CustomToolNode(ToolNode):
                     timestamp = datetime.datetime.now().isoformat()
                     content_str = msg.content
                     matched_ids = []
+                    
+                    # Extract query from the original tool call arguments securely
                     query_str = None
+                    if hasattr(msg, "tool_call_id") and msg.tool_call_id in tool_calls_map:
+                        tc_args = tool_calls_map[msg.tool_call_id]
+                        if "query" in tc_args:
+                            query_str = tc_args["query"]
                     
                     try:
                         content_dict = ast.literal_eval(content_str)
                         if isinstance(content_dict, dict):
                             if "matched_event_ids" in content_dict:
                                 matched_ids = content_dict["matched_event_ids"]
-                            if "query" in content_dict:
+                            if not query_str and "query" in content_dict:
                                 query_str = content_dict["query"]
                     except:
                         try:
                             content_json = json.loads(content_str)
                             if "matched_event_ids" in content_json:
                                 matched_ids = content_json["matched_event_ids"]
-                            if "query" in content_json:
+                            if not query_str and "query" in content_json:
                                 query_str = content_json["query"]
                         except:
                             pass

@@ -46,7 +46,6 @@ class IncidentState(TypedDict):
     raw_logs: List[dict]
     messages: Annotated[list[AnyMessage], add_messages]
     iteration_count: int
-    strategy: str
     mitre_techniques: List[str]
     candidate_evidence: List[dict]
     detected_signals: List[dict]
