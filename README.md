@@ -63,6 +63,8 @@ Each report answers four questions:
 The report is designed to be short and readable. It avoids unsupported claims such as data exfiltration, account compromise, or database compromise unless the logs provide direct evidence.
 
 ### Example Report Format
+<img width="1917" height="1055" alt="image" src="https://github.com/user-attachments/assets/77ae86e2-2832-4d7f-8879-81635dbc1375" />
+
 
 ```text
 ## Triage Summary
