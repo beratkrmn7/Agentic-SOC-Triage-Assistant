@@ -66,26 +66,6 @@ The report is designed to be short and readable. It avoids unsupported claims su
 <img width="1917" height="1055" alt="image" src="https://github.com/user-attachments/assets/77ae86e2-2832-4d7f-8879-81635dbc1375" />
 
 
-```text
-## Triage Summary
-- Verdict: suspicious
-- Incident Type: bruteforce_failed
-- Severity: medium
-- Confidence: 0.86
-
-## Why It Matters
-Multiple failed SSH login attempts were observed from the same source IP within a short time window. No successful login was found, so the activity is classified as suspicious rather than confirmed compromise.
-
-## Key Evidence
-- INC-002-E001: Failed password for root from 203.0.113.42 port 38412 ssh2
-- INC-002-E002: Failed password for admin from 203.0.113.42 port 38414 ssh2
-- INC-002-E003: Failed password for test from 203.0.113.42 port 38416 ssh2
-
-## Recommended Actions
-- Review additional authentication logs for the same source IP.
-- Check whether other hosts were targeted.
-- Consider temporary IP blocking if attempts continue.
-```
 
 ## Tech Stack
 
