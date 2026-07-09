@@ -10,7 +10,7 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_groq import ChatGroq
 import os
 
-from agent.models import IncidentState
+from agent.models import IncidentState, TriageResult
 from agent.tools import (
     tools_list, 
     search_logs,
