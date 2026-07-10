@@ -1,17 +1,58 @@
-from typing import List, Optional, Literal, TypedDict, Annotated
+from typing import List, Optional, Literal, TypedDict, Annotated, Dict, Any
 from pydantic import BaseModel, Field
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
-import operator
-
+from datetime import datetime
+from agent.schema import CanonicalLogEvent
 def append_list(left: list, right: list) -> list:
     return left + right
 
 class EvidenceItem(BaseModel):
-    event_id: str = Field(description="The unique event ID (e.g. INC-006-E001) that this evidence corresponds to.")
+    event_id: str = Field(description="The unique event ID (from the CANDIDATE EVIDENCE) that this evidence corresponds to.")
     quote: str = Field(description="The exact quote or summary from the log.")
     reason: str = Field(description="Reason why this evidence supports the verdict.")
     source: str = Field(description="The source of the evidence, usually 'raw_logs' or the name of a tool.")
+    original_fields: Dict[str, Any] = Field(default_factory=dict, description="Fields from original_log for validation.")
+    correlation_context: Dict[str, Any] = Field(default_factory=dict, description="Metrics context.")
+
+class ParseFailure(BaseModel):
+    line_number: Optional[int] = None
+    parser_name: Optional[str] = None
+    reason: str
+    raw_event: Any
+
+class IngestionResult(BaseModel):
+    total_records: int = 0
+    parsed_records: int = 0
+    failed_records: int = 0
+    unsupported_records: int = 0
+    events: List[CanonicalLogEvent] = Field(default_factory=list)
+    failures: List[ParseFailure] = Field(default_factory=list)
+
+class FilteringResult(BaseModel):
+    noise: List[CanonicalLogEvent] = Field(default_factory=list)
+    context: List[CanonicalLogEvent] = Field(default_factory=list)
+    candidates: List[CanonicalLogEvent] = Field(default_factory=list)
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+
+class IncidentBundle(BaseModel):
+    incident_id: str
+    incident_type_hint: str
+    first_seen: Optional[datetime] = None
+    last_seen: Optional[datetime] = None
+
+    source_ips: List[str] = Field(default_factory=list)
+    destination_ips: List[str] = Field(default_factory=list)
+    destination_ports: List[int] = Field(default_factory=list)
+
+    event_ids: List[str] = Field(default_factory=list)
+    events: List[CanonicalLogEvent] = Field(default_factory=list)
+    context_events: List[CanonicalLogEvent] = Field(default_factory=list)
+
+    correlation_reason: str = ""
+    correlation_metrics: Dict[str, Any] = Field(default_factory=dict)
+    severity_hint: Optional[str] = None
+    confidence_hint: Optional[float] = None
 
 class TriageResult(BaseModel):
     """
@@ -43,7 +84,7 @@ class IncidentState(TypedDict):
     The shared state for the LangGraph state machine.
     """
     incident_id: str
-    raw_logs: List[dict]
+    canonical_events: List[dict]
     messages: Annotated[list[AnyMessage], add_messages]
     iteration_count: int
     mitre_techniques: List[str]

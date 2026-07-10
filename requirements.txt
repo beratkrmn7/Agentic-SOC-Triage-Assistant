@@ -1,9 +1,10 @@
 langgraph
+langchain
 langchain-groq
 pydantic
+pydantic-settings
 python-dotenv
 fastapi
 uvicorn
-pytest
+python-multipart
 rich
-
