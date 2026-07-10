@@ -1,0 +1,2 @@
+{"start": "2026-07-10T11:00:00Z", "src": "198.51.100.1", "dst": "203.0.113.1", "sourcePort": 50000, "destinationPort": 22, "proto": "tcp", "deviceAction": "block", "tcpFlags": "S", "deviceInboundZone": "wan"}
+{"start": "2026-07-10T11:00:05Z", "src": "198.51.100.2", "dst": "203.0.113.2", "sourcePort": 50001, "destinationPort": 443, "proto": "tcp", "deviceAction": "pass", "tcpFlags": "SA", "deviceInboundZone": "wan"}

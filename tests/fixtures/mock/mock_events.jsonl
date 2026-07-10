@@ -1,0 +1,2 @@
+{"incident_id": "INC-001", "parser_name": "mock", "timestamp": "2026-07-10T10:00:00Z", "src_ip": "192.168.1.5", "dst_ip": "10.0.0.5", "src_port": 12345, "dst_port": 80, "protocol": "TCP", "action": "block", "event_type": "FIREWALL", "raw_message": "BLOCK TCP"}
+{"incident_id": "INC-001", "parser_name": "mock", "timestamp": "2026-07-10T10:00:01Z", "src_ip": "192.168.1.5", "dst_ip": "10.0.0.5", "src_port": 12346, "dst_port": 443, "protocol": "TCP", "action": "allow", "event_type": "FIREWALL", "raw_message": "ALLOW TCP"}

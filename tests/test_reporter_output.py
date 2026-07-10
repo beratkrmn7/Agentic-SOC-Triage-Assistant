@@ -1,6 +1,4 @@
-import pytest
 from agent.nodes import reporter_node
-from agent.models import IncidentState
 
 def test_reporter_sqli_format():
     state = {

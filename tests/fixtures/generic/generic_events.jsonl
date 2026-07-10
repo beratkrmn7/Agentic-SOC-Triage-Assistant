@@ -1,0 +1,2 @@
+{"timestamp": "2026-07-10T12:00:00Z", "client_ip": "1.1.1.1", "server_ip": "2.2.2.2", "sport": 1234, "dport": 80, "action": "deny", "message": "Generic deny message"}
+{"time": "2026-07-10T12:00:05Z", "source": {"address": "3.3.3.3", "port": 5678}, "destination": {"address": "4.4.4.4", "port": 443}, "status": "accept"}

@@ -1,26 +1,26 @@
+import logging
+logger = logging.getLogger(__name__)
+
 import json
-import os
 import re
 import datetime
 from typing import Literal
 from dotenv import load_dotenv
 load_dotenv()
 
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_groq import ChatGroq
-import os
 
 from agent.models import IncidentState, TriageResult
 from agent.tools import (
     tools_list, 
-    search_logs,
-    submit_triage_result,
     detect_sqli_patterns,
     detect_xss_patterns,
     detect_suspicious_commands,
     detect_bruteforce_pattern,
     detect_failed_then_success_login,
     detect_port_scan_pattern,
+    detect_network_flood,
     detect_dns_tunneling_pattern,
     detect_malware_hash_alert,
     detect_lateral_movement_pattern,
@@ -28,54 +28,75 @@ from agent.tools import (
     detect_benign_web_traffic,
     detect_normal_admin_login
 )
+from agent.config import get_settings
+from agent.errors import ConfigurationError
 
-llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
-llm_with_tools = llm.bind_tools(tools_list)
+_llm_cache = None
+
+def get_triage_llm():
+    global _llm_cache
+    if _llm_cache:
+        return _llm_cache
+    settings = get_settings()
+    if not settings.llm_enabled:
+        raise ConfigurationError("LLM is disabled via settings (LLM_ENABLED=false).")
+    if not settings.groq_api_key:
+        raise ConfigurationError("The triage provider is not configured (missing API key).")
+    
+    llm = ChatGroq(
+        model=settings.llm_model, 
+        temperature=0,
+        api_key=settings.groq_api_key.get_secret_value() if settings.groq_api_key else "",
+        max_retries=2
+    )
+    _llm_cache = llm.bind_tools(tools_list)
+    return _llm_cache
 
 def automated_detection_node(state: IncidentState) -> dict:
     """
     Deterministically runs detection rules based on event types and populates signals and evidence.
     """
-    print(f"--- PRE-ANALYSIS: Running automated detections for {state['incident_id']} ---")
-    raw_logs = state.get("raw_logs", [])
-    event_types = set([log.get("event_type") for log in raw_logs])
+    logger.info(f"--- PRE-ANALYSIS: Running automated detections for {state['incident_id']} ---")
+    canonical_events = state.get("canonical_events", [])
+    event_types = set([log.get("event_type") for log in canonical_events])
     
     automated_results = []
     
     if "SSH_AUTH" in event_types:
-        automated_results.append(detect_bruteforce_pattern(raw_logs))
-        automated_results.append(detect_failed_then_success_login(raw_logs))
+        automated_results.append(detect_bruteforce_pattern(canonical_events))
+        automated_results.append(detect_failed_then_success_login(canonical_events))
         
     if "HTTP_GET" in event_types or "HTTP_POST" in event_types:
-        automated_results.append(detect_sqli_patterns(raw_logs))
-        automated_results.append(detect_xss_patterns(raw_logs))
-        automated_results.append(detect_benign_web_traffic(raw_logs))
-        automated_results.append(detect_normal_admin_login(raw_logs))
+        automated_results.append(detect_sqli_patterns(canonical_events))
+        automated_results.append(detect_xss_patterns(canonical_events))
+        automated_results.append(detect_benign_web_traffic(canonical_events))
+        automated_results.append(detect_normal_admin_login(canonical_events))
         
     if "DNS_QUERY" in event_types:
-        automated_results.append(detect_dns_tunneling_pattern(raw_logs))
+        automated_results.append(detect_dns_tunneling_pattern(canonical_events))
         
     if "EDR_ALERT" in event_types:
-        automated_results.append(detect_malware_hash_alert(raw_logs))
+        automated_results.append(detect_malware_hash_alert(canonical_events))
         
-    if "FIREWALL" in event_types or "BLOCK TCP" in str(raw_logs).upper():
-        automated_results.append(detect_port_scan_pattern(raw_logs))
+    if "FIREWALL" in event_types or "BLOCK TCP" in str(canonical_events).upper():
+        automated_results.append(detect_port_scan_pattern(canonical_events))
+        automated_results.append(detect_network_flood(canonical_events))
         
     if "SMB_ACCESS" in event_types or "SERVICE_CREATE" in event_types:
-        automated_results.append(detect_lateral_movement_pattern(raw_logs))
+        automated_results.append(detect_lateral_movement_pattern(canonical_events))
         
     if "PROCESS_CREATE" in event_types or "BASH_CMD" in event_types:
-        automated_results.append(detect_suspicious_commands(raw_logs))
+        automated_results.append(detect_suspicious_commands(canonical_events))
         
     # Always check for backup agent
-    automated_results.append(detect_backup_false_positive(raw_logs))
+    automated_results.append(detect_backup_false_positive(canonical_events))
     
     # Filter out empty/clean results to save context
     meaningful_results = [res for res in automated_results if res.get("status") != "clean"]
     
     timestamp = datetime.datetime.now().isoformat()
-    detected_signals = []
-    candidate_evidence = []
+    detected_signals = list(state.get("detected_signals", []))
+    candidate_evidence = list(state.get("candidate_evidence", []))
     
     for res in meaningful_results:
         detected_signals.append({
@@ -86,6 +107,8 @@ def automated_detection_node(state: IncidentState) -> dict:
         })
         if res.get("candidate_evidence"):
             candidate_evidence.extend(res.get("candidate_evidence"))
+            
+    logger.debug(f"DEBUG: detected_signals = {json.dumps(detected_signals, indent=2)}")
 
     # Also log it to tool_results for generic history display
     formatted_tool_results = []
@@ -108,8 +131,8 @@ def entity_extraction_node(state: IncidentState) -> dict:
     """
     Deterministically extracts unique entities from raw logs using RegEx to save LLM tokens.
     """
-    print(f"--- ENTITY EXTRACTION: Extracting entities for {state['incident_id']} ---")
-    raw_logs = state.get("raw_logs", [])
+    logger.info(f"--- ENTITY EXTRACTION: Extracting entities for {state['incident_id']} ---")
+    canonical_events = state.get("canonical_events", [])
     
     entities = {
         "ips": set(),
@@ -128,7 +151,7 @@ def entity_extraction_node(state: IncidentState) -> dict:
     process_pattern = re.compile(r'\b[a-zA-Z0-9_]+\.exe\b')
     port_pattern = re.compile(r'(?:port |:)(\d{2,5})\b')
     
-    for log in raw_logs:
+    for log in canonical_events:
         log_str = json.dumps(log)
         
         for ip in ip_pattern.findall(log_str): entities["ips"].add(ip)
@@ -162,7 +185,7 @@ def triage_node(state: IncidentState) -> dict:
     iter_count = state.get("iteration_count", 0)
     
     if not messages:
-        print(f"--- TRIAGE AGENT: Starting autonomous investigation for {state['incident_id']} ---")
+        logger.info(f"--- TRIAGE AGENT: Starting autonomous investigation for {state['incident_id']} ---")
         
         detected_signals = state.get("detected_signals", [])
         signals_text = json.dumps(detected_signals, indent=2) if detected_signals else "No automated signals detected."
@@ -196,41 +219,53 @@ When submitting:
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            response = llm_with_tools.invoke(messages)
+            llm = get_triage_llm()
+            response = llm.invoke(messages)
+            if not hasattr(response, "tool_calls") or not response.tool_calls:
+                logger.info(f"--- TRIAGE AGENT: Model output plain text (Attempt {attempt+1}/{max_retries}). Forcing tool call... ---")
+                messages.append(response)
+                messages.append(HumanMessage(content="You must use the submit_triage_result tool to provide your final verdict. Do not just write text."))
+                continue
+            break
+        except ConfigurationError as ce:
+            logger.error(f"--- TRIAGE AGENT: Configuration Error -> {ce} ---")
+            from langchain_core.messages import AIMessage
+            response = AIMessage(content="API failed.", tool_calls=[])
             break
         except Exception as e:
             err_str = str(e)
-            if "429" in err_str or "rate_limit_exceeded" in err_str:
-                print(f"--- TRIAGE AGENT: Rate limit hit (Attempt {attempt+1}/{max_retries}). Sleeping for 8s... ---")
-                time.sleep(8)
-            elif "400" in err_str or "tool_use_failed" in err_str:
-                print(f"--- TRIAGE AGENT: Groq Parser Error (Attempt {attempt+1}/{max_retries}). Retrying... ---")
+            logger.debug(f"DEBUG: Exception in invoke! type={type(e)}, str={err_str}")
+            if "tool_use_failed" in err_str or "parse" in err_str.lower():
+                logger.error(f"--- TRIAGE AGENT: Local Parser Error (Attempt {attempt+1}/{max_retries}). Retrying... ---")
                 time.sleep(2)
             else:
-                print(f"--- TRIAGE AGENT: API Error -> {err_str} ---")
+                logger.error(f"--- TRIAGE AGENT: Ollama Error -> {err_str} ---")
                 if attempt == max_retries - 1:
                     raise
                 time.sleep(2)
     else:
         from langchain_core.messages import AIMessage
-        print("--- TRIAGE AGENT: Max retries exceeded. Forcing fallback. ---")
+        logger.info("--- TRIAGE AGENT: Max retries exceeded. Forcing fallback. ---")
         response = AIMessage(content="API failed.", tool_calls=[])
 
     return {"messages": [response], "iteration_count": iter_count + 1}
 
 def route_triage(state: IncidentState) -> Literal["tools", "process_result"]:
+    logger.debug(f"DEBUG route_triage: iteration_count = {state.get('iteration_count', 0)}")
     if state.get("iteration_count", 0) >= 5:
-        print("--- TRIAGE AGENT: Iteration limit reached. Forcing process_result ---")
+        logger.info("--- TRIAGE AGENT: Iteration limit reached. Forcing process_result ---")
         return "process_result"
         
     last_message = state["messages"][-1]
+    logger.debug(f"DEBUG route_triage: last_message type={type(last_message)}, tool_calls={getattr(last_message, 'tool_calls', None)}")
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
         has_submit = any(tool_call["name"] == "submit_triage_result" for tool_call in last_message.tool_calls)
-        
+        logger.debug(f"DEBUG route_triage: has_submit={has_submit}")
         if has_submit:
             return "process_result"
         return "tools"
     
+    logger.debug("DEBUG route_triage: no tool calls found, returning process_result")
     return "process_result"
 
 def process_result_node(state: IncidentState) -> dict:
@@ -244,7 +279,7 @@ def process_result_node(state: IncidentState) -> dict:
         # Check for mixed tool call edge case
         has_submit = any(tool_call["name"] == "submit_triage_result" for tool_call in last_message.tool_calls)
         if has_submit and len(last_message.tool_calls) > 1:
-            print("--- TRIAGE AGENT: Error - Mixed tool calls detected (Submit + Others). Forcing needs_review ---")
+            logger.error("--- TRIAGE AGENT: Error - Mixed tool calls detected (Submit + Others). Forcing needs_review ---")
             return {
                 "triage_verdict": "needs_review", 
                 "incident_type": "other",
@@ -258,7 +293,7 @@ def process_result_node(state: IncidentState) -> dict:
             if tool_call["name"] == "submit_triage_result":
                 try:
                     validated_args = TriageResult.model_validate(tool_call["args"])
-                    print(f"--- TRIAGE AGENT: Verdict submitted -> {validated_args.triage_verdict} ({validated_args.incident_type}) ---")
+                    logger.info(f"--- TRIAGE AGENT: Verdict submitted -> {validated_args.triage_verdict} ({validated_args.incident_type}) ---")
                     
                     severity = validated_args.severity
                     if validated_args.triage_verdict in ["false_positive", "needs_review"]:
@@ -272,7 +307,7 @@ def process_result_node(state: IncidentState) -> dict:
                         "evidence": [ev.model_dump() for ev in validated_args.evidence],
                     }
                 except Exception as e:
-                    print(f"--- TRIAGE AGENT: Pydantic Validation Error -> {e} ---")
+                    logger.error(f"--- TRIAGE AGENT: Pydantic Validation Error -> {e} ---")
                     return {
                         "triage_verdict": "needs_review",
                         "incident_type": "other",
@@ -282,7 +317,7 @@ def process_result_node(state: IncidentState) -> dict:
                         "errors": [f"Validation error: {e}"]
                     }
             
-    print("--- TRIAGE AGENT: Error - No verdict submitted properly or max iterations hit! ---")
+    logger.error("--- TRIAGE AGENT: Error - No verdict submitted properly or max iterations hit! ---")
     return {
         "triage_verdict": "needs_review", 
         "incident_type": "other",
@@ -296,18 +331,19 @@ def evidence_validation_node(state: IncidentState) -> dict:
     """
     Deterministically validates that the evidence event_ids exist AND the quote is exactly in the raw_message.
     Enforces evidence length and availability for false_positive as well.
+    Also checks if original_fields match the actual log.
     """
-    print(f"--- VALIDATION NODE: Validating evidence for {state['incident_id']} ---")
+    logger.info(f"--- VALIDATION NODE: Validating evidence for {state['incident_id']} ---")
     
     evidence_list = state.get("evidence", [])
     if not evidence_list:
         if state.get("triage_verdict") in ["suspicious", "confirmed_incident", "false_positive"]:
-            print(f"--- VALIDATION NODE: {state.get('triage_verdict')} verdict given without evidence. Forcing needs_review ---")
+            logger.info(f"--- VALIDATION NODE: {state.get('triage_verdict')} verdict given without evidence. Forcing needs_review ---")
             return {"validated_evidence": [], "rejected_evidence": [], "triage_verdict": "needs_review"}
         return {"validated_evidence": [], "rejected_evidence": []}
         
-    raw_logs = state.get("raw_logs", [])
-    log_map = {log.get("event_id"): log for log in raw_logs}
+    canonical_events = state.get("canonical_events", [])
+    log_map = {log.get("event_id"): log for log in canonical_events}
     
     validated = []
     rejected = []
@@ -316,34 +352,59 @@ def evidence_validation_node(state: IncidentState) -> dict:
         event_id = ev.get("event_id")
         quote = ev.get("quote", "").strip()
         
-        if len(quote) < 15:
-            print(f"--- VALIDATION NODE: Quote too short (<15 chars) for {event_id}. Quote: '{quote}' ---")
+        if not quote:
+            logger.info(f"--- VALIDATION NODE: Empty quote for {event_id}. ---")
             rejected.append(ev)
             continue
             
         if event_id in log_map:
             log_obj = log_map[event_id]
             raw_msg = log_obj.get("raw_message", "")
+            original_log = log_obj.get("original_log", {})
             
-            # If no raw_message exists, fallback to checking the whole log string
-            target_str = raw_msg if raw_msg else json.dumps(log_obj)
+            target_str = raw_msg if raw_msg else json.dumps(original_log)
             
-            if quote.lower() in target_str.lower():
+            # Condition A: Exact quote match (case-insensitive)
+            quote_match = quote.lower() in target_str.lower()
+            
+            # Condition B: Original fields match
+            fields_match = False
+            ev_fields = ev.get("original_fields", {}) if isinstance(ev, dict) else getattr(ev, "original_fields", {})
+            if ev_fields:
+                fields_match = True
+                for k, v in ev_fields.items():
+                    if k not in original_log or str(original_log[k]) != str(v):
+                        fields_match = False
+                        break
+                        
+            if quote_match or fields_match:
                 validated.append(ev)
             else:
-                print(f"--- VALIDATION NODE: Quote substring mismatch for {event_id}. Quote: '{quote}' ---")
-                rejected.append(ev)
+                logger.info(f"--- VALIDATION NODE: Match failed for {event_id}. ---")
+                ev_copy = dict(ev) if isinstance(ev, dict) else ev.model_dump()
+                ev_copy["validation_error"] = "quote_and_fields_mismatch"
+                rejected.append(ev_copy)
         else:
-            print(f"--- VALIDATION NODE: Unknown event_id {event_id} ---")
-            rejected.append(ev)
+            logger.info(f"--- VALIDATION NODE: Unknown event_id {event_id} ---")
+            ev_copy = dict(ev) if isinstance(ev, dict) else ev.model_dump()
+            ev_copy["validation_error"] = "event_not_found"
+            rejected.append(ev_copy)
             
     if rejected:
-        print(f"--- VALIDATION NODE: Warning! Rejected {len(rejected)} hallucinated or invalid evidence items! ---")
+        logger.warning(f"--- VALIDATION NODE: Warning! Rejected {len(rejected)} hallucinated or invalid evidence items! ---")
         
     verdict = state.get("triage_verdict")
     if not validated and verdict in ["suspicious", "confirmed_incident", "false_positive"]:
-        print("--- VALIDATION NODE: All evidence rejected. Forcing needs_review ---")
-        return {"validated_evidence": validated, "rejected_evidence": rejected, "triage_verdict": "needs_review"}
+        logger.info("--- VALIDATION NODE: All evidence rejected. Forcing needs_review ---")
+        return {
+            "validated_evidence": [],
+            "rejected_evidence": rejected,
+            "triage_verdict": "needs_review",
+            "severity": "none",
+            "confidence_score": 0.0,
+            "recommended_actions": ["SOC Analyst required: Manual review necessary due to total validation failure."],
+            "review_reason": "All generated evidence failed deterministic validation."
+        }
         
     return {
         "validated_evidence": validated,
@@ -354,7 +415,7 @@ def action_recommendation_node(state: IncidentState) -> dict:
     """
     Deterministically generates recommended actions and MITRE ATT&CK mapping based on the incident_type.
     """
-    print(f"--- ACTION NODE: Generating deterministic recommendations for {state['incident_id']} ---")
+    logger.info(f"--- ACTION NODE: Generating deterministic recommendations for {state['incident_id']} ---")
     
     verdict = state.get("triage_verdict")
     incident_type = state.get("incident_type")
@@ -429,7 +490,7 @@ def build_why_it_matters(incident_type: str, verdict: str) -> str:
         "powershell": "PowerShell execution with -EncodedCommand or -ExecutionPolicy Bypass indicates an attempt to hide commands and evade security policies.",
         "dns_tunneling": "DNS queries contain abnormally long, random-looking subdomains, a technique often used in DNS tunneling for covert data exfiltration or C2 communication.",
         "malware_hash": "EDR logs indicate the execution or download of a file matching a known malicious hash and malware family.",
-        "port_scan": "A single source IP attempted connections to multiple different destination ports in a short time, consistent with port scanning discovery activity.",
+        "port_scan": "A single source IP attempted connections to multiple different destination ports or hosts in a short time, consistent with port scanning discovery activity. Note: All observed attempts were blocked, and the provided logs contain no evidence of a successful connection.",
         "lateral_movement": "A combination of SMB access and PsExec service creation was observed, which strongly aligns with lateral movement attempts between hosts."
     }
     
@@ -460,7 +521,7 @@ def reporter_node(state: IncidentState) -> dict:
     """
     Generates a structured deterministic markdown summary.
     """
-    print(f"--- REPORTER AGENT: Generating deterministic report for {state['incident_id']} ---")
+    logger.info(f"--- REPORTER AGENT: Generating deterministic report for {state['incident_id']} ---")
     
     verdict = state.get("triage_verdict", "needs_review")
     incident_type = state.get("incident_type", "other")

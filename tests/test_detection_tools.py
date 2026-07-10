@@ -1,4 +1,3 @@
-import pytest
 from agent.tools import (
     detect_sqli_patterns, 
     detect_port_scan_pattern, 

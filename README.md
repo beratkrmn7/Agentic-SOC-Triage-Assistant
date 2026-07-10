@@ -1,8 +1,20 @@
-# Agentic SOC Triage Assistant
+# Agentic SOC Triage Assistant - Phase 1 (Foundation)
 
-A LangGraph-based Agentic SOC Triage Assistant PoC that combines deterministic detection rules, constrained LLM-based triage, evidence validation, and concise SOC reporting.
+The system operates strictly as a **Triage Assistant**. It does not perform autonomous remediation (e.g., blocking IPs) or replace SIEM correlation rules. Its purpose is to contextualize alerts and accelerate analyst decision-making.
 
-Bu proje, güvenlik loglarını analiz ederek SOC analistleri için kanıta dayalı triage kararı ve kısa olay raporu üreten agentic bir SOC triage PoC sistemidir.
+### Phase 2: Professional Log Ingestion Platform
+The ingestion layer has been upgraded to a modular, robust, and extensible platform capable of handling diverse log formats reliably:
+- **Safe Streaming Readers**: Memory-efficient processing of `JSONL`, `JSON Arrays`, `Syslog`, and `CEF` logs with strict size limits.
+- **Parser Plugin System**: A confidence-based parser registry with deterministic schema fingerprinting. Support for custom vendors is as easy as adding a class.
+- **Fail-safe Operations**: Unparseable and unsupported schemas are isolated. A single malformed line will not crash the pipeline.
+- **Canonical Schema**: All records are mapped to an upgraded `CanonicalLogEvent` standardizing IP, ports, network zones, timestamps, and parsing metadata.
+- **Full Traceability**: Every event gets a deterministic `EVT-*` ID, and all parse warnings/errors are captured without leaking sensitive raw logs.
+
+## Features (Phase 1)
+- **Robust Ingestion Pipeline**: Deterministically parses logs into a `CanonicalLogEvent` using schema fingerprinting and pre-defined parsers.
+- **Strict Evidence Validation**: Evidence gathered by the LLM is deterministically validated against the original logs (`original_fields` and `raw_message`).
+- **Graceful Fallback**: Enforces a `needs_review` verdict automatically if the agent hallucinates or if the LLM is unavailable.
+- **Decoupled Architecture**: End-to-end data contracts using typed `CanonicalLogEvent` objects instead of raw dictionaries.
 
 ## System Overview
 
@@ -17,11 +29,11 @@ The final output is a concise SOC triage report focused on four questions:
 
 ## Architecture
 
-The workflow is implemented as a controlled LangGraph state machine. Deterministic nodes handle extraction, detection, validation, MITRE mapping, and action recommendation. The LLM is constrained to the triage and reporting stages, reducing hallucination risk and keeping decisions evidence-based.
-
-![Architecture](mermaid-diagram-2026-07-09-103321.png)
-
-The key idea is that the LLM does not directly decide from raw logs alone. It receives deterministic signals and candidate evidence, and its output is validated before reporting.
+1. **Ingestion Layer (`agent/ingestion/`)**: Modular platform supporting JSON, Syslog, CEF. Detects formats, streams data securely, generates fingerprints, and assigns deterministic IDs.
+2. **Parser Registry (`agent/parsers/`)**: Confidence-based plugin system containing parsers for `pf_firewall`, `syslog`, `cef`, `generic_json`, and `mock`.
+3. **Filtering Engine (`agent/filtering.py`)**: Filters out known noisy events (e.g., internal scans) and flags candidates.
+4. **Correlation Engine (`agent/correlation.py`)**: Groups related events into Incident Bundles based on source IP and temporal proximity.
+5. **Triage Agent (`agent/graph.py`)**: LangGraph workflow containing Pre-Analysis, Triage, and Reporting nodes. Uses Groq/Llama-3 for decision making.
 
 ## Key Features
 
@@ -65,8 +77,6 @@ The report is designed to be short and readable. It avoids unsupported claims su
 ### Example Report Format
 <img width="1917" height="1055" alt="image" src="https://github.com/user-attachments/assets/77ae86e2-2832-4d7f-8879-81635dbc1375" />
 
-
-
 ## Tech Stack
 
 - Python 3.10+
@@ -103,131 +113,69 @@ SOC-Project/
 
 ## Getting Started
 
-### 1. Install dependencies
+### Prerequisites
+- Python 3.11+
+- [Groq API Key](https://console.groq.com/) (Optional, but required for full LLM capability)
 
-```bash
-pip install -r requirements.txt
-```
+### Installation
+1. Clone the repository
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Configure environment variables:
+   Copy `.env.example` to `.env` and configure your settings.
+   ```bash
+   cp .env.example .env
+   ```
 
-### 2. Configure environment variables
+### Running Locally
 
-Create a `.env` file:
-
-```env
-GROQ_API_KEY=your_groq_api_key_here
-```
-
-Do not commit `.env` to GitHub.
-
-### 3. Run terminal demo
-
+**CLI Mode:**
+Run mock data through the pipeline:
 ```bash
 python main.py
 ```
 
-Run all mock incidents:
-
+Process a specific log file:
 ```bash
-RUN_ALL=true python main.py
+python main.py --file data/samples/sanitized_firewall_sample.jsonl
 ```
 
-### 4. Run API server
-
+To quickly test the ingestion platform without running LLM triage:
 ```bash
-python server.py
+python main.py --ingest-file tests/fixtures/mixed/mixed_formats.log
 ```
 
-Open Swagger UI:
-
-```text
-http://localhost:8000/docs
+To run a benchmark on the ingestion pipeline:
+```bash
+python scripts/benchmark_ingestion.py --generate-mb 10
 ```
 
-### 5. Run tests
+**API Mode:**
+Run the REST API:
+```bash
+python -m uvicorn server:app --reload
+```
+Endpoints:
+- `GET /health` : Liveness probe
+- `GET /ready` : Readiness probe (checks LLM availability)
+- `POST /analyze` : Mock endpoint for analysis
+
+## Testing & CI
+This project uses `pytest`, `mypy`, and `ruff` for code quality and testing. The test suite does not require external network requests and executes gracefully when `LLM_ENABLED=false`.
 
 ```bash
+# Run tests
 pytest
+
+# Run linter
+ruff check .
+
+# Run type checking
+mypy agent/
 ```
 
-## API Endpoints
-
-### Health check
-
-```http
-GET /health
-```
-
-### Analyze incident
-
-```http
-POST /analyze
-```
-
-Example request:
-
-```json
-{
-  "incident_id": "INC-001",
-  "raw_logs": [
-    {
-      "timestamp": "2023-10-27T10:15:00Z",
-      "src_ip": "192.168.1.100",
-      "dst_ip": "10.0.0.5",
-      "event_type": "HTTP_GET",
-      "raw_message": "GET /index.html HTTP/1.1 200 OK"
-    }
-  ]
-}
-```
-
-### Get report
-
-```http
-GET /incident/{incident_id}/report
-```
-
-## Mock Dataset
-
-The project includes mock SOC incidents covering both suspicious activity and false positives:
-
-- Standard benign web traffic
-- Failed SSH brute force attempt
-- SQL injection attempt
-- Normal admin login false positive
-- Port scan activity
-- Brute force followed by successful login
-- XSS payload attempt
-- Suspicious PowerShell command
-- Malware hash alert
-- DNS tunneling pattern
-- Lateral movement via SMB/PsExec
-- Internal backup traffic false positive
-
-## Limitations
-
-This project is a PoC and is not intended to replace a production SIEM, SOAR, or SOC platform.
-
-Current limitations:
-
-- Uses mock log data instead of a real SIEM backend.
-- Detection rules are simplified for demonstration.
-- Threat intelligence integrations are not included yet.
-- The LLM is used for triage synthesis, so output is constrained and validated.
-- In-memory API storage is used instead of a persistent database.
-
-## Future Work
-
-Possible improvements:
-
-- Elasticsearch or OpenSearch integration
-- VirusTotal / AbuseIPDB threat intelligence lookup
-- Persistent incident database
-- Web dashboard for analysts
-- More MITRE ATT&CK mappings
-- Human-in-the-loop approval workflow
-- Docker deployment
-- More realistic log normalization pipeline
-
-## Security Note
-
-Never commit `.env` files or API keys. Use `.env.example` for documentation and keep real credentials local.
+## Security
+- Do not commit `.env` or any real API keys to version control.
+- Dummy keys and mock endpoints should be used in test environments.

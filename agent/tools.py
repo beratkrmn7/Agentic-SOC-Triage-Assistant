@@ -1,10 +1,12 @@
+import logging
+logger = logging.getLogger(__name__)
+
 import json
 import re
 from datetime import datetime, timedelta
-from typing import Annotated, Literal, List, Dict, Any
+from typing import Annotated, List
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
-from pydantic import BaseModel, Field
 import ipaddress
 
 # We import EvidenceItem and TriageResult to keep schemas DRY
@@ -74,7 +76,7 @@ def search_logs(query: str, state: Annotated[dict, InjectedState]) -> dict:
     Returns JSON containing matching logs.
     """
     incident_id = state.get("incident_id", "Unknown")
-    print(f"\n[Tool Execution] Searching logs for '{query}' in incident {incident_id}...")
+    logger.info(f"\n[Tool Execution] Searching logs for '{query}' in incident {incident_id}...")
     
     raw_logs = state.get("raw_logs", [])
     if not raw_logs:
@@ -185,7 +187,8 @@ def detect_failed_then_success_login(raw_logs: list) -> dict:
     return format_detection_result("detect_failed_then_success_login", "Failed then Success Login", list(unique_matched))
 
 def detect_port_scan_pattern(raw_logs: list) -> dict:
-    blocks = [log for log in raw_logs if "BLOCK TCP" in json.dumps(log).upper()]
+    # A true port scan usually involves many blocks from the same IP to different ports.
+    blocks = [log for log in raw_logs if str(log.get("action", "")).lower() == "block" or "BLOCK" in str(log.get("raw_message", "")).upper()]
     blocks.sort(key=lambda x: parse_time(x.get("timestamp", "")))
     
     groups = {}
@@ -208,10 +211,15 @@ def detect_port_scan_pattern(raw_logs: list) -> dict:
                 if t_curr - t_start > timedelta(minutes=5):
                     break
                     
-                msg = logs[j].get("raw_message", "")
-                port_match = re.search(r'->\s*(?:[0-9]{1,3}\.){3}[0-9]{1,3}:(\d+)', msg)
-                if port_match:
-                    ports_seen.add(port_match.group(1))
+                dst_port = logs[j].get("dst_port")
+                if dst_port:
+                    ports_seen.add(dst_port)
+                else:
+                    msg = logs[j].get("raw_message", "")
+                    port_match = re.search(r'->\s*(?:[0-9]{1,3}\.){3}[0-9]{1,3}:(\d+)', msg)
+                    if port_match:
+                        ports_seen.add(port_match.group(1))
+
                 window_logs.append(logs[j])
                 
             if len(ports_seen) >= 3:
@@ -221,23 +229,110 @@ def detect_port_scan_pattern(raw_logs: list) -> dict:
     unique_matched = {m.get("event_id"): m for m in matched}.values()
     return format_detection_result("detect_port_scan_pattern", "Port Scan", list(unique_matched))
 
-def detect_dns_tunneling_pattern(raw_logs: list) -> dict:
-    dns = [log for log in raw_logs if "DNS_QUERY" in log.get("event_type", "")]
+def detect_network_flood(raw_logs: list) -> dict:
+    # A simple connection count is not enough to prove a network flood.
+    # To avoid false positives (e.g. from busy DNS servers or web servers),
+    # this detector requires more metrics.
+    # For now, we return insufficient_data or no_alert unless we see massive
+    # connection attempts with same src/dst in a very short window with mostly blocks.
+    
+    logs_sorted = sorted(raw_logs, key=lambda x: parse_time(x.get("timestamp", "")))
+    groups = {}
+    for log in logs_sorted:
+        src = log.get("src_ip")
+        dst = log.get("dst_ip")
+        if not src or not dst:
+            continue
+        key = (src, dst)
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(log)
+        
     matched = []
+    metrics = {}
+    for (src, dst), src_logs in groups.items():
+        if len(src_logs) < 100: # Increased threshold drastically
+            continue
+            
+        for i in range(len(src_logs)):
+            window_logs = []
+            t_start = parse_time(src_logs[i].get("timestamp", ""))
+            blocks = 0
+            
+            for j in range(i, len(src_logs)):
+                t_curr = parse_time(src_logs[j].get("timestamp", ""))
+                if t_curr - t_start > timedelta(minutes=1): # Shorter time window
+                    break
+                window_logs.append(src_logs[j])
+                if str(src_logs[j].get("action", "")).lower() in ["block", "deny", "drop"]:
+                    blocks += 1
+                
+            if len(window_logs) >= 100 and blocks / len(window_logs) > 0.8:
+                matched.extend(window_logs)
+                metrics = {
+                    "source_ip": src,
+                    "destination_ip": dst,
+                    "connection_count": len(window_logs),
+                    "blocked_ratio": blocks / len(window_logs),
+                    "time_window_seconds": 60
+                }
+                break
+                
+    if not matched:
+        return {
+            "detector_name": "detect_network_flood",
+            "status": "not_applicable",
+            "message": "Insufficient data to determine network flood, or traffic looks normal.",
+            "matched_event_ids": [],
+            "metrics": {},
+            "candidate_evidence": []
+        }
+        
+    unique_matched = {m.get("event_id"): m for m in matched}.values()
+    result = format_detection_result("detect_network_flood", "Network Flood", list(unique_matched))
+    result["metrics"] = metrics
+    return result
+
+def detect_dns_tunneling_pattern(raw_logs: list) -> dict:
+    dns = [log for log in raw_logs if log.get("event_type", "") == "DNS_QUERY" or log.get("dst_port") == 53]
+    matched = []
+    metrics = {}
     
     for log in dns:
-        msg = log.get("raw_message", "")
-        domain_match = re.search(r'Query:\s*([a-zA-Z0-9.-]+)', msg)
-        if domain_match:
-            domain = domain_match.group(1)
-            parts = domain.split('.')
-            if len(parts) >= 3 and len(parts[0]) > 20: 
-                matched.append(log)
+        # Avoid treating destinationFqdns as query if it's just enrichment
+        fqdns = log.get("destination_fqdns", [])
+        if not fqdns:
+            fqdns = log.get("destinationFqdns", [])
+            
+        # Try to extract query from fqdns or raw message
+        queries = fqdns
+        if not queries:
+            msg = log.get("raw_message", "")
+            domain_match = re.search(r'Query:\s*([a-zA-Z0-9.-]+)', msg)
+            if domain_match:
+                queries = [domain_match.group(1)]
                 
-    if not matched and len(dns) >= 3:
-        matched.extend(dns)
+        for query in queries:
+            parts = query.split('.')
+            if len(parts) >= 3 and len(parts[0]) > 25: # Check for long subdomain (e.g., >25 chars)
+                matched.append(log)
+                metrics["longest_subdomain"] = len(parts[0])
+                metrics["query_name"] = query
+                break # Matched for this log
+                
+    if not matched:
+        return {
+            "detector_name": "detect_dns_tunneling_pattern",
+            "status": "not_applicable",
+            "message": "No evidence of DNS tunneling found. Traffic appears to be normal DNS.",
+            "matched_event_ids": [],
+            "metrics": {},
+            "candidate_evidence": []
+        }
         
-    return format_detection_result("detect_dns_tunneling_pattern", "DNS Tunneling", matched)
+    result = format_detection_result("detect_dns_tunneling_pattern", "DNS Tunneling", matched)
+    result["metrics"] = metrics
+    return result
 
 def detect_malware_hash_alert(raw_logs: list) -> dict:
     edr = [log for log in raw_logs if "EDR_ALERT" in log.get("event_type", "")]
