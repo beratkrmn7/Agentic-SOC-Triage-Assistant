@@ -1,4 +1,4 @@
-ijson>=3.2.0
+ijson>=3.3,<4
 langgraph
 langchain
 langchain-groq

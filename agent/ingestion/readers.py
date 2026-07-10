@@ -139,8 +139,10 @@ def iter_json_array_records(path: Path, limits: IngestionLimits) -> Iterator[Rec
                     env.framing_error = "malformed_json"
                     yield env
                 records_yielded += 1
+        except (RecordLimitExceededError, InputTooLargeError, InvalidEncodingError):
+            raise
         except Exception as e:
-            raise UnsupportedInputFormatError(f"Invalid JSON Array: {e}")
+            raise UnsupportedInputFormatError(f"Invalid JSON Array: {e}") from e
 
 def iter_json_object_records(path: Path, limits: IngestionLimits) -> Iterator[RecordEnvelope]:
     """Reads a file containing a single JSON object."""

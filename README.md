@@ -1,4 +1,4 @@
-# Agentic SOC Triage Assistant - Phase 1 (Foundation)
+# Agentic SOC Triage Assistant - Phase 2 (Log Ingestion & Parsing Platform)
 
 The system operates strictly as a **Triage Assistant**. It does not perform autonomous remediation (e.g., blocking IPs) or replace SIEM correlation rules. Its purpose is to contextualize alerts and accelerate analyst decision-making.
 
@@ -93,7 +93,7 @@ The report is designed to be short and readable. It avoids unsupported claims su
 
 ## Tech Stack
 
-- Python 3.10+
+- Python 3.11+
 - LangGraph
 - LangChain / LangChain Groq
 - Groq API with Llama 3.3 70B
@@ -108,20 +108,20 @@ The report is designed to be short and readable. It avoids unsupported claims su
 ```text
 SOC-Project/
 ├── agent/
+│   ├── ingestion/        # Log ingestion pipeline, readers, and limits
+│   ├── parsers/          # Parsers and plugins (syslog, cef, generic json, pf_firewall)
 │   ├── graph.py          # LangGraph workflow definition
 │   ├── nodes.py          # Workflow nodes: extraction, detection, triage, validation, reporting
 │   ├── tools.py          # LLM-accessible tools and deterministic detection functions
+│   ├── schema.py         # Canonical schema mapping
+│   ├── correlation.py    # Temporal and spatial correlation engine
 │   └── models.py         # Pydantic schemas and LangGraph state definitions
-├── data/
-│   └── mock_logs.json    # Mock SOC incident dataset
-├── tests/
-│   ├── test_detection_tools.py
-│   ├── test_evidence_validation.py
-│   ├── test_reporter_output.py
-│   └── test_graph_smoke.py
+├── data/                 # Sample logs and mock datasets
+├── tests/                # Pytest coverage (100% passing)
 ├── main.py               # Terminal-based test runner
 ├── server.py             # FastAPI server
-├── requirements.txt
+├── requirements.txt      
+├── requirements-dev.txt
 └── README.md
 ```
 
