@@ -1,19 +1,18 @@
 import logging
 import time
-import uuid
 import traceback
 import hashlib
-from typing import Union, Iterable, Dict, Any, List
+from typing import Union, Iterable, Dict, Any, Optional
 from pathlib import Path
 
 from agent.config import get_settings
 settings = get_settings()
-from agent.schema import CanonicalLogEvent
 from agent.ingestion.models import (
     InputFormat, ParseStatus, RecordEnvelope, ParseFailure, 
-    ParserSelection, IngestionMetrics, IngestionResult
+    IngestionResult
 )
-from agent.ingestion.limits import IngestionLimits, IngestionError, RecordLimitExceededError
+from agent.ingestion.limits import IngestionLimits
+from agent.errors import IngestionError, RecordLimitExceededError
 from agent.ingestion.readers import (
     detect_input_format, iter_jsonl_records, iter_json_array_records, 
     iter_text_records, iter_input_records, iter_json_object_records
@@ -25,7 +24,7 @@ from agent.parsers.registry import ParserRegistry, default_registry
 logger = logging.getLogger(__name__)
 
 class IngestionPipeline:
-    def __init__(self, registry: ParserRegistry = None, limits: IngestionLimits = None):
+    def __init__(self, registry: Optional[ParserRegistry] = None, limits: Optional[IngestionLimits] = None):
         self.registry = registry or default_registry
         self.limits = limits or settings.ingestion
         

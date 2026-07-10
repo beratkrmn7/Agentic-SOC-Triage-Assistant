@@ -1,15 +1,14 @@
 import json
 import hashlib
-from typing import Iterator, Union, Dict, Any, Iterable
+from typing import Iterator, Union, Dict, Any, Iterable, Optional
 from pathlib import Path
 from datetime import datetime, timezone
 import logging
 
 from agent.ingestion.models import InputFormat, RecordEnvelope
-from agent.ingestion.limits import (
-    IngestionLimits, 
+from agent.ingestion.limits import IngestionLimits
+from agent.errors import (
     InputTooLargeError, 
-    RecordTooLargeError, 
     RecordLimitExceededError,
     UnsupportedInputFormatError,
     InvalidEncodingError
@@ -62,8 +61,8 @@ def detect_input_format(path: Path, first_bytes: bytes) -> InputFormat:
 def create_envelope(
     source_name: str,
     raw_record: Union[Dict[str, Any], str],
-    line_number: int = None,
-    byte_offset: int = None
+    line_number: Optional[int] = None,
+    byte_offset: Optional[int] = None
 ) -> RecordEnvelope:
     
     if isinstance(raw_record, dict):
@@ -124,26 +123,24 @@ def iter_jsonl_records(path: Path, limits: IngestionLimits) -> Iterator[RecordEn
             byte_offset += line_len
 
 def iter_json_array_records(path: Path, limits: IngestionLimits) -> Iterator[RecordEnvelope]:
-    # For a real streaming JSON array, ijson would be ideal. 
-    # To avoid 3rd party C-deps right now, if file is within limits, we load it.
-    if path.stat().st_size > limits.MAX_UPLOAD_BYTES:
-        raise InputTooLargeError(f"JSON Array file exceeds upload limit ({limits.MAX_UPLOAD_BYTES} bytes).")
-        
+    import ijson
     source_name = path.name
-    with open(path, 'r', encoding='utf-8') as f:
+    with open(path, 'rb') as f:
         try:
-            data = json.load(f)
-            if not isinstance(data, list):
-                raise UnsupportedInputFormatError("File does not contain a JSON array.")
-                
-            for idx, item in enumerate(data):
-                if idx >= limits.MAX_RECORDS_PER_FILE:
+            records_yielded = 0
+            for item in ijson.items(f, 'item'):
+                if records_yielded >= limits.MAX_RECORDS_PER_FILE:
                     raise RecordLimitExceededError(f"Exceeded max records limit: {limits.MAX_RECORDS_PER_FILE}")
                 
                 if isinstance(item, dict):
-                    yield create_envelope(source_name, item, line_number=idx+1)
-        except json.JSONDecodeError as e:
-            raise UnsupportedInputFormatError(f"Invalid JSON: {e}")
+                    yield create_envelope(source_name, item, line_number=records_yielded+1)
+                else:
+                    env = create_envelope(source_name, str(item), line_number=records_yielded+1)
+                    env.framing_error = "malformed_json"
+                    yield env
+                records_yielded += 1
+        except Exception as e:
+            raise UnsupportedInputFormatError(f"Invalid JSON Array: {e}")
 
 def iter_json_object_records(path: Path, limits: IngestionLimits) -> Iterator[RecordEnvelope]:
     """Reads a file containing a single JSON object."""
