@@ -11,7 +11,8 @@ from agent.ingestion.limits import (
     InputTooLargeError, 
     RecordTooLargeError, 
     RecordLimitExceededError,
-    UnsupportedInputFormatError
+    UnsupportedInputFormatError,
+    InvalidEncodingError
 )
 from agent.ingestion.fingerprint import get_schema_fingerprint
 
@@ -38,11 +39,18 @@ def detect_input_format(path: Path, first_bytes: bytes) -> InputFormat:
     elif content.startswith('{'):
         # Could be JSON_OBJECT or JSONL
         # Usually JSONL has newlines, but difficult to tell definitively from first bytes
-        # We will assume JSONL if path ends with .jsonl, otherwise fallback to object reading
         if path.suffix.lower() in ['.jsonl', '.ndjson']:
             return InputFormat.JSONL
-        elif '\n' in content and content.split('\n')[1].strip().startswith('{'):
-            return InputFormat.JSONL
+        elif path.suffix.lower() in ['.log', '.txt']:
+            return InputFormat.TEXT_LOG
+        elif '\n' in content:
+            first_line = content.split('\n')[0].strip()
+            if first_line.endswith('}'):
+                try:
+                    json.loads(first_line)
+                    return InputFormat.JSONL
+                except json.JSONDecodeError:
+                    pass
         return InputFormat.JSON_OBJECT
     elif content.startswith('CEF:'):
         return InputFormat.CEF
@@ -78,6 +86,7 @@ def create_envelope(
 
 def iter_jsonl_records(path: Path, limits: IngestionLimits) -> Iterator[RecordEnvelope]:
     source_name = path.name
+    encoding_errors = 'replace' if limits.ALLOW_ENCODING_REPLACEMENT else 'strict'
     with open(path, 'rb') as f:
         byte_offset = 0
         records_yielded = 0
@@ -92,7 +101,11 @@ def iter_jsonl_records(path: Path, limits: IngestionLimits) -> Iterator[RecordEn
                 byte_offset += line_len
                 continue
                 
-            line_str = line_bytes.decode('utf-8', errors='replace').strip()
+            try:
+                line_str = line_bytes.decode('utf-8', errors=encoding_errors).strip()
+            except UnicodeDecodeError as e:
+                raise InvalidEncodingError(f"Invalid UTF-8 encoding at line {line_number} in {source_name}: {e}")
+                
             if not line_str:
                 byte_offset += line_len
                 continue
@@ -102,9 +115,10 @@ def iter_jsonl_records(path: Path, limits: IngestionLimits) -> Iterator[RecordEn
                 yield create_envelope(source_name, raw_record, line_number, byte_offset)
                 records_yielded += 1
             except json.JSONDecodeError as e:
-                # Yield as raw string so fallback parsers like syslog or cef can attempt to parse it
-                logger.warning(f"Malformed JSON line {line_number} in {source_name}: {e}. Yielding as raw string.")
-                yield create_envelope(source_name, line_str, line_number, byte_offset)
+                logger.warning(f"Malformed JSON line {line_number} in {source_name}: {e}. Yielding with framing_error.")
+                env = create_envelope(source_name, line_str, line_number, byte_offset)
+                env.framing_error = "malformed_json"
+                yield env
                 records_yielded += 1
             
             byte_offset += line_len
@@ -113,7 +127,7 @@ def iter_json_array_records(path: Path, limits: IngestionLimits) -> Iterator[Rec
     # For a real streaming JSON array, ijson would be ideal. 
     # To avoid 3rd party C-deps right now, if file is within limits, we load it.
     if path.stat().st_size > limits.MAX_UPLOAD_BYTES:
-        raise InputTooLargeError("JSON Array file too large to safely parse in memory without streaming library.")
+        raise InputTooLargeError(f"JSON Array file exceeds upload limit ({limits.MAX_UPLOAD_BYTES} bytes).")
         
     source_name = path.name
     with open(path, 'r', encoding='utf-8') as f:
@@ -131,8 +145,24 @@ def iter_json_array_records(path: Path, limits: IngestionLimits) -> Iterator[Rec
         except json.JSONDecodeError as e:
             raise UnsupportedInputFormatError(f"Invalid JSON: {e}")
 
+def iter_json_object_records(path: Path, limits: IngestionLimits) -> Iterator[RecordEnvelope]:
+    """Reads a file containing a single JSON object."""
+    if path.stat().st_size > limits.MAX_UPLOAD_BYTES:
+        raise InputTooLargeError(f"JSON Object file exceeds upload limit ({limits.MAX_UPLOAD_BYTES} bytes).")
+        
+    source_name = path.name
+    with open(path, 'r', encoding='utf-8') as f:
+        try:
+            data = json.load(f)
+            if not isinstance(data, dict):
+                raise UnsupportedInputFormatError("File does not contain a single JSON object.")
+            yield create_envelope(source_name, data, line_number=1)
+        except json.JSONDecodeError as e:
+            raise UnsupportedInputFormatError(f"Invalid JSON Object: {e}")
+
 def iter_text_records(path: Path, limits: IngestionLimits) -> Iterator[RecordEnvelope]:
     source_name = path.name
+    encoding_errors = 'replace' if limits.ALLOW_ENCODING_REPLACEMENT else 'strict'
     with open(path, 'rb') as f:
         byte_offset = 0
         records_yielded = 0
@@ -147,10 +177,24 @@ def iter_text_records(path: Path, limits: IngestionLimits) -> Iterator[RecordEnv
                 byte_offset += line_len
                 continue
                 
-            line_str = line_bytes.decode('utf-8', errors='replace').strip()
+            try:
+                line_str = line_bytes.decode('utf-8', errors=encoding_errors).strip()
+            except UnicodeDecodeError as e:
+                raise InvalidEncodingError(f"Invalid UTF-8 encoding at line {line_number} in {source_name}: {e}")
+                
             if not line_str:
                 byte_offset += line_len
                 continue
+                
+            if line_str.startswith('{'):
+                try:
+                    raw_record = json.loads(line_str)
+                    yield create_envelope(source_name, raw_record, line_number, byte_offset)
+                    records_yielded += 1
+                    byte_offset += line_len
+                    continue
+                except json.JSONDecodeError:
+                    pass
                 
             yield create_envelope(source_name, line_str, line_number, byte_offset)
             records_yielded += 1

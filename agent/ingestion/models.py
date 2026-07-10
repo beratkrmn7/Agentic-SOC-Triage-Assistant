@@ -10,6 +10,7 @@ class InputFormat(str, Enum):
     JSON_OBJECT = "json_object"
     SYSLOG = "syslog"
     CEF = "cef"
+    TEXT_LOG = "text_log"
     UNKNOWN = "unknown"
 
 class ParseStatus(str, Enum):
@@ -28,6 +29,7 @@ class RecordEnvelope(BaseModel):
     raw_record_hash: str
     schema_fingerprint: Optional[str] = None
     received_at: datetime
+    framing_error: Optional[str] = None
 
 class ParseFailure(BaseModel):
     source_name: str

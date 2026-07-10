@@ -8,6 +8,7 @@ class IngestionLimits(BaseSettings):
     MAX_RAW_PREVIEW_CHARS: int = 500
     INGESTION_CHUNK_SIZE: int = 1000
     INGESTION_TIMEOUT_SECONDS: int = 300
+    ALLOW_ENCODING_REPLACEMENT: bool = False
 
 class IngestionError(Exception):
     """Base class for ingestion exceptions."""

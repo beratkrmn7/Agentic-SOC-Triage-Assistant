@@ -42,7 +42,7 @@ def normalize_timestamp(ts_str: str) -> Optional[datetime]:
     if rfc3164_pattern.match(ts_str):
         current_year = datetime.now(timezone.utc).year
         try:
-            dt = datetime.strptime(ts_str[:15], "%b %d %H:%M:%S")
+            dt = datetime.strptime(f"1900 {ts_str[:15]}", "%Y %b %d %H:%M:%S")
             dt = dt.replace(year=current_year, tzinfo=timezone.utc)
             return dt
         except ValueError:
