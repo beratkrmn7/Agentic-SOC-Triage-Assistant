@@ -24,7 +24,7 @@ class GenericJsonParser(BaseLogParser):
             # simple dot notation support
             if "." in alias:
                 parts = alias.split(".")
-                val = record
+                val: Any = record
                 for part in parts:
                     if isinstance(val, dict) and part in val:
                         val = val[part]

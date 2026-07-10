@@ -35,9 +35,9 @@ class LLMParserAssistant:
             raise ConfigurationError("Missing API key for LLM fallback.")
             
         self.llm = ChatGroq(
-            model=settings.llm_model, 
+            model="llama-3.1-70b-versatile", 
             temperature=0, 
-            api_key=settings.groq_api_key.get_secret_value()
+            api_key=settings.groq_api_key.get_secret_value() if settings.groq_api_key else None  # type: ignore
         )
         self.structured_llm = self.llm.with_structured_output(MappingConfig)
         
@@ -59,8 +59,9 @@ Do NOT invent keys, only use exactly what is in the JSON.
         
         try:
             self._init_llm()
-            mapping: MappingConfig = self.structured_llm.invoke(messages)
-            return mapping
+            if not self.structured_llm: return MappingConfig()
+            mapping = self.structured_llm.invoke(messages)
+            return mapping or MappingConfig()
         except Exception as e:
             logger.error(f"Error generating LLM fallback mapping: {e}")
             return MappingConfig()
@@ -94,7 +95,7 @@ Do NOT invent keys, only use exactly what is in the JSON.
             raw_message = json.dumps(raw_log)
             
         return CanonicalLogEvent(
-            timestamp=str(get_val(mapping.timestamp_key)) if get_val(mapping.timestamp_key) else None,
+            timestamp=None,
             src_ip=str(src_ip) if src_ip else None,
             dst_ip=str(dst_ip) if dst_ip else None,
             src_port=int(src_port) if src_port is not None else None,
@@ -102,7 +103,7 @@ Do NOT invent keys, only use exactly what is in the JSON.
             event_type=str(event_type) if event_type else None,
             raw_message=str(raw_message),
             original_log=raw_log,
-            event_id=raw_log.get("event_id"),
+            event_id=raw_log.get("event_id") or "UNKNOWN",
             parser_name="llm_fallback",
             parse_status="success"
         )

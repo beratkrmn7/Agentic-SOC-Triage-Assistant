@@ -9,6 +9,7 @@ from agent.graph import app
 from agent.ingestion.pipeline import IngestionPipeline
 from agent.filtering import EventFilter
 from agent.correlation import CorrelationEngine
+from agent.models import IncidentState
 
 console = Console()
 
@@ -38,8 +39,9 @@ def run_incident_graph(incident_bundle, raw_logs=None):
                 "original_fields": ev.original_log
             })
 
-    initial_state = {
-        "incident_id": incident_bundle.incident_id if hasattr(incident_bundle, 'incident_id') else incident_bundle.get("incident_id"),
+    incident_id = incident_bundle.incident_id if hasattr(incident_bundle, 'incident_id') else incident_bundle.get("incident_id")
+    initial_state: IncidentState = {
+        "incident_id": incident_id,
         "canonical_events": canonical_events,
         "messages": [],
         "iteration_count": 0,
@@ -139,7 +141,7 @@ def ingest_file_only(file_path: str):
     ingest = IngestionPipeline()
     result = ingest.ingest_file(file_path)
     
-    console.print(f"\n[bold cyan]--- INGESTION SUMMARY ---[/bold cyan]")
+    console.print("\n[bold cyan]--- INGESTION SUMMARY ---[/bold cyan]")
     console.print(f"Source: {result.source_name}")
     console.print(f"Format: {result.input_format.value}")
     console.print(f"Duration: {result.metrics.duration_ms} ms")

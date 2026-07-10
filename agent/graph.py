@@ -1,6 +1,7 @@
 import json
 import datetime
 import ast
+from typing import Any
 
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -20,7 +21,8 @@ from agent.nodes import (
 )
 
 class CustomToolNode(ToolNode):
-    def invoke(self, input_val, config=None, **kwargs):
+    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        input_val = input
         tool_calls_map = {}
         if isinstance(input_val, dict) and "messages" in input_val:
             last_msg = input_val["messages"][-1]
@@ -53,14 +55,14 @@ class CustomToolNode(ToolNode):
                                 matched_ids = content_dict["matched_event_ids"]
                             if not query_str and "query" in content_dict:
                                 query_str = content_dict["query"]
-                    except:
+                    except Exception:
                         try:
                             content_json = json.loads(content_str)
                             if "matched_event_ids" in content_json:
                                 matched_ids = content_json["matched_event_ids"]
                             if not query_str and "query" in content_json:
                                 query_str = content_json["query"]
-                        except:
+                        except Exception:
                             pass
                             
                     tool_record = {

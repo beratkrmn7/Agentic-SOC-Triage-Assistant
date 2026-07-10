@@ -1,6 +1,3 @@
-import logging
-logger = logging.getLogger(__name__)
-
 import json
 import re
 import datetime
@@ -31,6 +28,10 @@ from agent.tools import (
 from agent.config import get_settings
 from agent.errors import ConfigurationError
 
+import logging
+logger = logging.getLogger(__name__)
+
+
 _llm_cache = None
 
 def get_triage_llm():
@@ -46,7 +47,7 @@ def get_triage_llm():
     llm = ChatGroq(
         model=settings.llm_model, 
         temperature=0,
-        api_key=settings.groq_api_key.get_secret_value() if settings.groq_api_key else "",
+        api_key=settings.groq_api_key.get_secret_value() if settings.groq_api_key else None,  # type: ignore
         max_retries=2
     )
     _llm_cache = llm.bind_tools(tools_list)
@@ -134,7 +135,7 @@ def entity_extraction_node(state: IncidentState) -> dict:
     logger.info(f"--- ENTITY EXTRACTION: Extracting entities for {state['incident_id']} ---")
     canonical_events = state.get("canonical_events", [])
     
-    entities = {
+    entities: dict[str, set] = {
         "ips": set(),
         "users": set(),
         "hashes": set(),
@@ -154,23 +155,32 @@ def entity_extraction_node(state: IncidentState) -> dict:
     for log in canonical_events:
         log_str = json.dumps(log)
         
-        for ip in ip_pattern.findall(log_str): entities["ips"].add(ip)
-        for h in hash_pattern.findall(log_str): entities["hashes"].add(h)
-        for dom in domain_pattern.findall(log_str): entities["domains"].add(dom)
-        for proc in process_pattern.findall(log_str): entities["processes"].add(proc)
-        for port in port_pattern.findall(log_str): entities["ports"].add(port)
+        for ip in ip_pattern.findall(log_str):
+            entities["ips"].add(ip)
+        for h in hash_pattern.findall(log_str):
+            entities["hashes"].add(h)
+        for dom in domain_pattern.findall(log_str):
+            entities["domains"].add(dom)
+        for proc in process_pattern.findall(log_str):
+            entities["processes"].add(proc)
+        for port in port_pattern.findall(log_str):
+            entities["ports"].add(port)
             
-        if log.get("user"): entities["users"].add(log["user"])
-        if log.get("username"): entities["users"].add(log["username"])
+        if log.get("user"):
+            entities["users"].add(log["user"])
+        if log.get("username"):
+            entities["users"].add(log["username"])
         
         endpoint_match = re.search(r' (/[a-zA-Z0-9_/?=-]*) HTTP', log_str)
         if endpoint_match: entities["endpoints"].add(endpoint_match.group(1))
             
         cmd_match = re.search(r'CMD=(.*?)(?:\"|\}|$)', log_str)
-        if cmd_match: entities["commands"].add(cmd_match.group(1))
+        if cmd_match:
+            entities["commands"].add(cmd_match.group(1))
         
         ps_match = re.search(r'(powershell.*)', log_str, re.IGNORECASE)
-        if ps_match: entities["commands"].add(ps_match.group(1))
+        if ps_match:
+            entities["commands"].add(ps_match.group(1))
         
     return {
         "entities": {k: list(v) for k, v in entities.items()}

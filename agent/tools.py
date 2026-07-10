@@ -1,16 +1,14 @@
-import logging
-logger = logging.getLogger(__name__)
-
 import json
 import re
+import logging
+import ipaddress
 from datetime import datetime, timedelta
 from typing import Annotated, List
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
-import ipaddress
-
-# We import EvidenceItem and TriageResult to keep schemas DRY
 from agent.models import EvidenceItem, TriageResult
+
+logger = logging.getLogger(__name__)
 
 MAX_EVIDENCE_PER_DETECTOR = 5
 
@@ -19,7 +17,7 @@ def parse_time(ts_str: str) -> datetime:
         # ISO format like "2023-10-27T18:00:00Z"
         ts_str = ts_str.replace("Z", "+00:00")
         return datetime.fromisoformat(ts_str)
-    except:
+    except Exception:
         return datetime.min
 
 def format_detection_result(detector_name: str, title: str, matched_logs: list, is_benign: bool = False, custom_msg: str = "") -> dict:
@@ -134,7 +132,7 @@ def detect_bruteforce_pattern(raw_logs: list) -> dict:
     # Sort chronologically
     failed_logins.sort(key=lambda x: parse_time(x.get("timestamp", "")))
     
-    groups = {}
+    groups: dict[tuple, List[dict]] = {}
     for log in failed_logins:
         key = (log.get("src_ip"), log.get("dst_ip"))
         if key not in groups:
@@ -160,7 +158,7 @@ def detect_failed_then_success_login(raw_logs: list) -> dict:
     logins = [log for log in raw_logs if "failed" in json.dumps(log).lower() or "accepted" in json.dumps(log).lower() or "200 ok - user=" in json.dumps(log).lower()]
     logins.sort(key=lambda x: parse_time(x.get("timestamp", "")))
     
-    groups = {}
+    groups: dict[tuple, List[dict]] = {}
     for log in logins:
         key = (log.get("src_ip"), log.get("dst_ip"))
         if key not in groups:
@@ -191,7 +189,7 @@ def detect_port_scan_pattern(raw_logs: list) -> dict:
     blocks = [log for log in raw_logs if str(log.get("action", "")).lower() == "block" or "BLOCK" in str(log.get("raw_message", "")).upper()]
     blocks.sort(key=lambda x: parse_time(x.get("timestamp", "")))
     
-    groups = {}
+    groups: dict[str, List[dict]] = {}
     for log in blocks:
         src = log.get("src_ip")
         if src not in groups:
@@ -237,7 +235,7 @@ def detect_network_flood(raw_logs: list) -> dict:
     # connection attempts with same src/dst in a very short window with mostly blocks.
     
     logs_sorted = sorted(raw_logs, key=lambda x: parse_time(x.get("timestamp", "")))
-    groups = {}
+    groups: dict[str, List[dict]] = {}
     for log in logs_sorted:
         src = log.get("src_ip")
         dst = log.get("dst_ip")

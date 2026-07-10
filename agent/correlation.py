@@ -14,7 +14,7 @@ class CorrelationEngine:
         # We sort all candidates by timestamp
         candidates = sorted(
             [e for e in candidate_events if e.timestamp], 
-            key=lambda x: x.timestamp
+            key=lambda x: x.timestamp or datetime.min
         )
         
         if not candidates:
@@ -32,7 +32,7 @@ class CorrelationEngine:
         
         # Group remaining unassigned by src_ip roughly
         if unassigned:
-            src_groups = {}
+            src_groups: dict[str, List[CanonicalLogEvent]] = {}
             for e in unassigned:
                 if not e.src_ip: continue
                 if e.src_ip not in src_groups:
@@ -78,7 +78,7 @@ class CorrelationEngine:
     def detect_horizontal_port_scan(self, candidates: List[CanonicalLogEvent], context_events: List[CanonicalLogEvent]) -> List[IncidentBundle]:
         # Same src_ip, same dst_port, distinct_dst_ips >= 5 within 5 minutes
         bundles = []
-        groups = {}
+        groups: dict[tuple[str, int], List[CanonicalLogEvent]] = {}
         for ev in candidates:
             if not ev.src_ip or not ev.dst_port:
                 continue
@@ -96,7 +96,7 @@ class CorrelationEngine:
                 distinct_dst = set()
                 t_start = evs[i].timestamp
                 for j in range(i, len(evs)):
-                    if evs[j].timestamp - t_start > timedelta(minutes=5):
+                    if evs[j].timestamp and t_start and evs[j].timestamp - t_start > timedelta(minutes=5):  # type: ignore
                         break
                     window.append(evs[j])
                     distinct_dst.add(evs[j].dst_ip)
@@ -115,7 +115,7 @@ class CorrelationEngine:
     def detect_vertical_port_scan(self, candidates: List[CanonicalLogEvent], context_events: List[CanonicalLogEvent]) -> List[IncidentBundle]:
         # Same src_ip, same dst_ip, distinct_dst_ports >= 5 within 5 minutes
         bundles = []
-        groups = {}
+        groups: dict[tuple[str, str], List[CanonicalLogEvent]] = {}
         for ev in candidates:
             if not ev.src_ip or not ev.dst_ip:
                 continue
@@ -132,7 +132,7 @@ class CorrelationEngine:
                 distinct_ports = set()
                 t_start = evs[i].timestamp
                 for j in range(i, len(evs)):
-                    if evs[j].timestamp - t_start > timedelta(minutes=5):
+                    if evs[j].timestamp and t_start and evs[j].timestamp - t_start > timedelta(minutes=5):  # type: ignore
                         break
                     window.append(evs[j])
                     if evs[j].dst_port:
@@ -159,7 +159,7 @@ class CorrelationEngine:
         
     def _detect_service_scan(self, events: List[CanonicalLogEvent], incident_type: str, svc_name: str) -> List[IncidentBundle]:
         bundles = []
-        groups = {}
+        groups: dict[str, List[CanonicalLogEvent]] = {}
         for ev in events:
             if not ev.src_ip: continue
             if ev.src_ip not in groups:
@@ -180,9 +180,10 @@ class CorrelationEngine:
     def detect_spi_anomaly_cluster(self, candidates: List[CanonicalLogEvent], context_events: List[CanonicalLogEvent]) -> List[IncidentBundle]:
         spi = [e for e in candidates if "blocked by spi" in str(e.raw_message).lower()]
         bundles = []
-        groups = {}
+        groups: dict[str, List[CanonicalLogEvent]] = {}
         for ev in spi:
-            if not ev.src_ip: continue
+            if not ev.src_ip:
+                continue
             if ev.src_ip not in groups:
                 groups[ev.src_ip] = []
             groups[ev.src_ip].append(ev)
