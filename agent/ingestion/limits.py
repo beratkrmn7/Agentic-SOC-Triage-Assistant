@@ -9,25 +9,3 @@ class IngestionLimits(BaseSettings):
     INGESTION_CHUNK_SIZE: int = 1000
     INGESTION_TIMEOUT_SECONDS: int = 300
     ALLOW_ENCODING_REPLACEMENT: bool = False
-
-class IngestionError(Exception):
-    """Base class for ingestion exceptions."""
-    pass
-
-class UnsupportedInputFormatError(IngestionError):
-    pass
-
-class InputTooLargeError(IngestionError):
-    pass
-
-class RecordTooLargeError(IngestionError):
-    pass
-
-class RecordLimitExceededError(IngestionError):
-    pass
-
-class InvalidEncodingError(IngestionError):
-    pass
-
-class MalformedRecordError(IngestionError):
-    pass

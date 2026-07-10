@@ -1,3 +1,4 @@
+ijson>=3.2.0
 langgraph
 langchain
 langchain-groq

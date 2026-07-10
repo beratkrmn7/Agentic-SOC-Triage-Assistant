@@ -5,9 +5,9 @@ from pydantic import BaseModel
 from typing import List, Dict, Optional
 import json
 import uvicorn
-import shutil
 import os
 import tempfile
+import uuid
 
 from agent.config import get_settings
 from agent.errors import InputTooLargeError, UnsupportedInputFormatError, InvalidEncodingError
@@ -15,6 +15,7 @@ from agent.graph import app as agent_app
 from agent.ingestion.pipeline import IngestionPipeline
 from agent.filtering import EventFilter
 from agent.correlation import CorrelationEngine
+from agent.models import IncidentState
 
 app = FastAPI(
     title="Agentic SOC Triage Assistant",
@@ -35,21 +36,28 @@ incident_store: Dict[str, dict] = {}
 async def input_too_large_handler(request: Request, exc: InputTooLargeError):
     return JSONResponse(
         status_code=413,
-        content={"code": "input_too_large", "message": str(exc)}
+        content={"code": "input_too_large", "message": "The uploaded file exceeds the configured size limit.", "request_id": uuid.uuid4().hex}
     )
 
 @app.exception_handler(UnsupportedInputFormatError)
 async def unsupported_format_handler(request: Request, exc: UnsupportedInputFormatError):
     return JSONResponse(
         status_code=415,
-        content={"code": "unsupported_input_format", "message": str(exc)}
+        content={"code": "unsupported_input_format", "message": "The uploaded file format is not supported.", "request_id": uuid.uuid4().hex}
     )
 
 @app.exception_handler(InvalidEncodingError)
 async def invalid_encoding_handler(request: Request, exc: InvalidEncodingError):
     return JSONResponse(
         status_code=422,
-        content={"code": "invalid_encoding", "message": str(exc)}
+        content={"code": "invalid_encoding", "message": "The uploaded file contains invalid text encoding.", "request_id": uuid.uuid4().hex}
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"code": "internal_error", "message": "An internal error occurred.", "request_id": uuid.uuid4().hex}
     )
 
 async def secure_save_upload(file: UploadFile) -> str:
@@ -112,7 +120,7 @@ def analyze_incident(req: AnalyzeRequest):
     processed_logs = ingest_pipeline.ingest_records(raw_logs, source_name="mock_api").events
     canonical_events = [log.model_dump(mode="json") for log in processed_logs]
 
-    initial_state = {
+    initial_state: IncidentState = {
         "incident_id": req.incident_id,
         "canonical_events": canonical_events, 
         "messages": [],
@@ -124,20 +132,17 @@ def analyze_incident(req: AnalyzeRequest):
         "tool_results": [],
         "errors": []
     }
-    try:
-        final_state = agent_app.invoke(initial_state)
-        incident_store[req.incident_id] = final_state
-        return AnalyzeResponse(
-            incident_id=req.incident_id,
-            triage_verdict=final_state.get('triage_verdict'),
-            incident_type=final_state.get('incident_type'),
-            severity=final_state.get('severity'),
-            confidence_score=final_state.get('confidence_score'),
-            mitre_techniques=final_state.get('mitre_techniques', []),
-            report_status="Generated" if final_state.get('final_report') else "Not Generated"
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    final_state = agent_app.invoke(initial_state)
+    incident_store[req.incident_id] = final_state
+    return AnalyzeResponse(
+        incident_id=req.incident_id,
+        triage_verdict=final_state.get('triage_verdict'),
+        incident_type=final_state.get('incident_type'),
+        severity=final_state.get('severity'),
+        confidence_score=final_state.get('confidence_score'),
+        mitre_techniques=final_state.get('mitre_techniques', []),
+        report_status="Generated" if final_state.get('final_report') else "Not Generated"
+    )
 
 @app.post("/ingest/file")
 async def ingest_file(file: UploadFile = File(...)):
@@ -156,8 +161,6 @@ async def ingest_file(file: UploadFile = File(...)):
             "metrics": result.metrics.model_dump(),
             "warnings": result.warnings
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -198,7 +201,7 @@ async def analyze_file(file: UploadFile = File(...)):
                         "original_fields": ev.original_log
                     })
                     
-            initial_state = {
+            initial_state: IncidentState = {
                 "incident_id": bundle.incident_id,
                 "canonical_events": canonical_events,
                 "messages": [],
@@ -210,35 +213,26 @@ async def analyze_file(file: UploadFile = File(...)):
                 "tool_results": [],
                 "errors": []
             }
+            
             final_state = agent_app.invoke(initial_state)
             incident_store[bundle.incident_id] = final_state
             
             incident_summaries.append({
                 "incident_id": bundle.incident_id,
-                "type_hint": bundle.incident_type_hint,
-                "verdict": final_state.get('triage_verdict'),
-                "severity": final_state.get('severity')
+                "triage_verdict": final_state.get('triage_verdict'),
+                "incident_type": final_state.get('incident_type'),
+                "severity": final_state.get('severity'),
+                "confidence_score": final_state.get('confidence_score'),
+                "mitre_techniques": final_state.get('mitre_techniques', []),
+                "report_status": "Generated" if final_state.get('final_report') else "Not Generated"
             })
             
         return {
-            "total_events": ingest_result.metrics.total_records,
-            "parsed_events": ingest_result.metrics.parsed_records,
-            "failed_events": ingest_result.metrics.failed_records,
-            "unsupported_events": ingest_result.metrics.unsupported_records,
-            "noise_events": filter_result.metrics.get('noise', 0),
-            "context_events": filter_result.metrics.get('context', 0),
-            "candidate_events": filter_result.metrics.get('candidates', 0),
-            "incidents_created": len(bundles),
+            "ingestion_metrics": ingest_result.metrics.model_dump(),
+            "filtered_events": len(filter_result.candidates),
+            "incidents_generated": len(incident_summaries),
             "incidents": incident_summaries
         }
-    except InputTooLargeError:
-        raise
-    except UnsupportedInputFormatError:
-        raise
-    except InvalidEncodingError:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -258,8 +252,6 @@ def get_incident_report(incident_id: str):
         "mitre_techniques": state.get("mitre_techniques", []),
         "final_report_markdown": state.get("final_report", "No report available.")
     }
-
-
 
 if __name__ == "__main__":
     print("Starting Agentic SOC API Server on http://localhost:8000")

@@ -17,3 +17,25 @@ class EvidenceValidationError(Exception):
 class LLMProviderError(Exception):
     """Raised when the LLM provider is unreachable or returns an error."""
     pass
+
+class IngestionError(Exception):
+    """Base class for ingestion exceptions."""
+    pass
+
+class UnsupportedInputFormatError(IngestionError):
+    pass
+
+class InputTooLargeError(IngestionError):
+    pass
+
+class RecordTooLargeError(IngestionError):
+    pass
+
+class RecordLimitExceededError(IngestionError):
+    pass
+
+class InvalidEncodingError(IngestionError):
+    pass
+
+class MalformedRecordError(IngestionError):
+    pass
