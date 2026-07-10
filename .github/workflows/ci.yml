@@ -22,15 +22,17 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+    - name: Compile python files
+      run: python -m compileall agent main.py server.py
     - name: Run Linting (Ruff)
       run: |
         ruff check .
     - name: Run Type Checking (MyPy)
       run: |
-        mypy agent/
+        mypy agent main.py server.py
     - name: Run Tests (PyTest)
       run: |
-        pytest -q --cov=agent
+        python -m pytest -q --cov=agent --cov-report=term-missing
       env:
         LLM_ENABLED: false

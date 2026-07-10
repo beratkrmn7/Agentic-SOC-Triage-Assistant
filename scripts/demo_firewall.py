@@ -1,5 +1,5 @@
 import json
-from agent.ingest import IngestPipeline
+from agent.ingestion.pipeline import IngestionPipeline
 from agent.graph import app
 from rich.console import Console
 
@@ -19,7 +19,7 @@ def test():
     for i, log in enumerate(raw_logs):
         log["event_id"] = f"PFSENSE-E{i+1:03d}"
         
-    pipeline = IngestPipeline()
+    pipeline = IngestionPipeline()
     processed_logs = pipeline.process_logs(raw_logs)
     
     initial_state = {

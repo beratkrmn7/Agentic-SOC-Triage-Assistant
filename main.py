@@ -76,7 +76,7 @@ def run_incident_graph(incident_bundle, raw_logs=None):
 def analyze_file(file_path: str):
     console.print(f"[bold blue]Starting File Analysis: {file_path}[/bold blue]")
     
-    ingest = IngestPipeline()
+    ingest = IngestionPipeline()
     filter_engine = EventFilter()
     correlator = CorrelationEngine()
     
@@ -123,7 +123,7 @@ def run_mock_test():
             if "event_id" not in log:
                 log["event_id"] = f"{incident_id}-E{i+1:03d}"
                 
-        # We pass raw_logs and let run_incident_graph normalize them via IngestPipeline
+        # We pass raw_logs and let run_incident_graph normalize them via IngestionPipeline
         run_incident_graph({"incident_id": incident_id}, raw_logs)
             
         if not run_all:
