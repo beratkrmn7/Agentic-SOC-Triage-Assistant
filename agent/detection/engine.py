@@ -50,7 +50,7 @@ class DetectionEngine:
         deduped_events = []
         for e in candidate_events:
             if not e.event_id:
-                warnings.append(f"Skipped event without ID")
+                warnings.append("Skipped event without ID")
                 metrics.skipped_events += 1
                 continue
             key = f"{e.event_id}|{e.raw_record_hash or ''}"

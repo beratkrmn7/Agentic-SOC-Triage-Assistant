@@ -39,7 +39,7 @@ class LLMParserAssistant:
         self.llm = ChatGroq(
             model=settings.llm_model, 
             temperature=0, 
-            api_key=settings.groq_api_key.get_secret_value() if settings.groq_api_key else None,
+            api_key=settings.groq_api_key,
             max_retries=2
         )
         self.structured_llm = self.llm.with_structured_output(MappingConfig)

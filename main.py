@@ -8,7 +8,6 @@ from rich.panel import Panel
 from agent.graph import app
 from agent.ingestion.pipeline import IngestionPipeline
 from agent.filtering import EventFilter
-from agent.correlation import CorrelationEngine
 from agent.models import IncidentState
 
 console = Console()

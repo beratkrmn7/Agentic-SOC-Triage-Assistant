@@ -3,7 +3,6 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional
-import json
 import uvicorn
 import os
 import tempfile
@@ -14,7 +13,6 @@ from agent.errors import InputTooLargeError, UnsupportedInputFormatError, Invali
 from agent.graph import app as agent_app
 from agent.ingestion.pipeline import IngestionPipeline
 from agent.filtering import EventFilter
-from agent.correlation import CorrelationEngine
 from agent.models import IncidentState
 
 app = FastAPI(

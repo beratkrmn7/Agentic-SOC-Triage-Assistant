@@ -46,7 +46,7 @@ def get_triage_llm():
     llm = ChatGroq(
         model=settings.llm_model, 
         temperature=0,
-        api_key=settings.groq_api_key.get_secret_value(),
+        api_key=settings.groq_api_key,
         max_retries=2
     )
     _llm_cache = llm.bind_tools(tools_list)
