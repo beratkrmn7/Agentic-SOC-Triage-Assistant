@@ -18,15 +18,17 @@ class NetworkFloodRule(BaseDetectionRule):
     def evaluate(self, events: Sequence[CanonicalLogEvent], context: DetectionContext) -> List[DetectionSignal]:
         settings = context.settings
         
-        # We group by (src_ip, dst_ip) for flood to target
+        # We group by (src_ip, dst_ip, dst_port, protocol) for flood to target
         groups = defaultdict(list)
         for e in events:
             if not e.src_ip or not e.dst_ip:
                 continue
-            groups[(e.src_ip, e.dst_ip)].append(e)
+            protocol = getattr(e, 'protocol', "UNKNOWN") or "UNKNOWN"
+            dst_port = e.dst_port if e.dst_port is not None else 0
+            groups[(e.src_ip, e.dst_ip, dst_port, protocol)].append(e)
 
         signals = []
-        for (src_ip, dst_ip), evs in groups.items():
+        for (src_ip, dst_ip, dst_port, protocol), evs in groups.items():
             if len(evs) < settings.NETWORK_FLOOD_MIN_EVENTS:
                 continue
                 
@@ -39,13 +41,21 @@ class NetworkFloodRule(BaseDetectionRule):
                 if block_ratio < settings.NETWORK_FLOOD_MIN_BLOCK_RATIO:
                     return False, {}
                     
-                distinct_ports = set(e.dst_port for e in window if e.dst_port is not None)
+                first_ts = window[0].timestamp
+                last_ts = window[-1].timestamp
+                observed_duration = 1.0
+                if first_ts and last_ts:
+                    observed_duration = max(1.0, (last_ts - first_ts).total_seconds())
+                    
+                eps = len(window) / observed_duration
                 
                 return True, {
                     "block_ratio": block_ratio,
                     "event_count": len(window),
-                    "distinct_ports": len(distinct_ports),
-                    "eps": len(window) / max(1, settings.NETWORK_FLOOD_WINDOW_SECONDS)
+                    "eps": eps,
+                    "observed_window_seconds": observed_duration,
+                    "destination_port": dst_port,
+                    "protocol": protocol
                 }
 
             matches = sliding_window_scan(evs, settings.NETWORK_FLOOD_WINDOW_SECONDS, check_window)
@@ -55,7 +65,7 @@ class NetworkFloodRule(BaseDetectionRule):
                 first_seen = match_events[0].timestamp or datetime.now()
                 last_seen = match_events[-1].timestamp or datetime.now()
                 
-                sig_id = generate_signal_id(self.rule_id, self.version, src_ip, f"target_{dst_ip}", first_seen, event_ids)
+                sig_id = generate_signal_id(self.rule_id, self.version, src_ip, f"target_{dst_ip}_{dst_port}_{protocol}", first_seen, event_ids)
                 
                 evidence = select_representative_evidence(
                     match_events, 

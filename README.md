@@ -195,3 +195,24 @@ mypy agent/
 ## Security
 - Do not commit `.env` or any real API keys to version control.
 - Dummy keys and mock endpoints should be used in test environments.
+
+## Phase 3 Detection Engine Usage
+
+### CLI Integration Mode
+The deterministic detection engine runs locally during CLI analysis.
+```bash
+python main.py analyze-file tests/data/sample_logs.jsonl
+```
+This runs the full ingestion pipeline, applies deterministic detection algorithms, clusters correlated incidents, and triggers the AI triage agent on each incident.
+
+### API Mode
+The deterministic detection engine can be exposed as an API endpoint for SIEM integration.
+```bash
+uvicorn server:app --reload
+```
+
+Submit a log file for pure deterministic detection (No AI):
+```bash
+curl -X POST -F "file=@tests/data/sample_logs.jsonl" http://localhost:8000/detect/file
+```
+The response returns sanitized incidents, signals summary, and duration metrics.

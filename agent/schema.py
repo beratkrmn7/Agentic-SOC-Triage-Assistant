@@ -53,3 +53,4 @@ class CanonicalLogEvent(BaseModel):
 
     raw_message: str = ""
     original_log: Dict[str, Any] = Field(default_factory=dict)
+    parser_metadata: Optional[Dict[str, Any]] = None

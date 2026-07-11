@@ -28,7 +28,9 @@ def generate_events(num_records: int) -> list[CanonicalLogEvent]:
             dst_port=port,
             action=action,
             parser_name="test",
-            parse_status="success"
+            parse_status="success",
+            protocol="TCP",
+            tcp_flags="SYN" if is_scan else None
         ))
     return events
 

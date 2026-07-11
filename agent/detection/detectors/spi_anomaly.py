@@ -27,8 +27,15 @@ class SPIAnomalyRule(BaseDetectionRule):
             # Check canonical action_reason
             if e.action_reason and "spi" in str(e.action_reason).lower():
                 is_spi = True
-            # Fallback to normalized raw_message checking if action_reason is missing, but strict
-            elif e.raw_message and "blocked by spi" in str(e.raw_message).lower():
+            # Check event_outcome or action for spi related blocks
+            elif e.event_outcome and "spi" in str(e.event_outcome).lower():
+                is_spi = True
+            elif e.action and "spi" in str(e.action).lower():
+                is_spi = True
+            # Check metadata or fallback to raw_message checking
+            elif e.parser_metadata and e.parser_metadata.get("spi_anomaly", False):
+                is_spi = True
+            elif settings.SPI_ANOMALY_FALLBACK_RAW_MATCH and e.raw_message and "blocked by spi" in str(e.raw_message).lower():
                 is_spi = True
                 
             if is_spi:

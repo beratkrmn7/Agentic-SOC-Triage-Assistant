@@ -12,50 +12,11 @@ from agent.models import IncidentState
 
 console = Console()
 
-def run_incident_graph(incident_bundle, raw_logs=None):
-    if raw_logs is not None:
-        # Backward compatibility for mock logs: convert them to canonical format
-        from agent.ingestion.pipeline import IngestionPipeline
-        c_events = IngestionPipeline().ingest_records(raw_logs, source_name="mock_incidents").events
-        canonical_events = [e.model_dump(mode="json") for e in c_events]
-    else:
-        canonical_events = [log.model_dump(mode="json") for log in getattr(incident_bundle, 'events', [])]
-        
-    detected_signals = []
-    candidate_evidence = []
-    
-    if hasattr(incident_bundle, 'correlation_reason') and incident_bundle.correlation_reason:
-        detected_signals.append({
-            "detector_name": "CorrelationEngine",
-            "status": "alert",
-            "message": incident_bundle.correlation_reason,
-            "matched_event_ids": incident_bundle.event_ids
-        })
-        for ev in incident_bundle.events:
-            candidate_evidence.append({
-                "event_id": ev.event_id,
-                "quote": ev.raw_message or json.dumps(ev.original_log),
-                "original_fields": ev.original_log
-            })
-
-    incident_id = incident_bundle.incident_id if hasattr(incident_bundle, 'incident_id') else incident_bundle.get("incident_id")
-    initial_state: IncidentState = {
-        "incident_id": incident_id,
-        "canonical_events": canonical_events,
-        "messages": [],
-        "iteration_count": 0,
-        "mitre_techniques": [],
-        "candidate_evidence": candidate_evidence,
-        "detected_signals": detected_signals,
-        "search_history": [],
-        "tool_results": [],
-        "errors": []
-    }
-    
+def run_graph_from_state(initial_state: IncidentState):
     try:
         final_state = app.invoke(initial_state)
         
-        console.print(f"\n[bold cyan]--- FINAL STATE ({initial_state['incident_id']}) ---[/bold cyan]")
+        console.print(f"\n[bold cyan]--- FINAL STATE ({initial_state.get('incident_id', 'unknown')}) ---[/bold cyan]")
         console.print(f"[bold]Verdict:[/bold] {final_state.get('triage_verdict')}")
         console.print(f"[bold]Incident Type:[/bold] {final_state.get('incident_type')}")
         console.print(f"[bold]Severity:[/bold] {final_state.get('severity')}")
@@ -69,10 +30,59 @@ def run_incident_graph(incident_bundle, raw_logs=None):
             
         return final_state
     except Exception as e:
-        console.print(f"\n[bold red][ERROR] An error occurred while processing {initial_state['incident_id']}: {e}[/bold red]")
+        console.print(f"\n[bold red][ERROR] An error occurred while processing {initial_state.get('incident_id', 'unknown')}: {e}[/bold red]")
         import traceback
         traceback.print_exc()
         return None
+
+def run_graph_from_incident(incident, event_map: dict, signal_map: dict = None) -> IncidentState:
+    signal_map = signal_map or {}
+    
+    incident_id = incident.incident_id if hasattr(incident, 'incident_id') else incident.get("incident_id")
+    event_ids = incident.event_ids if hasattr(incident, 'event_ids') else incident.get("event_ids", [])
+    signal_ids = incident.signal_ids if hasattr(incident, 'signal_ids') else incident.get("signal_ids", [])
+    evidence_list = incident.evidence if hasattr(incident, 'evidence') else incident.get("evidence", [])
+    
+    canonical_events = []
+    for eid in event_ids:
+        if eid in event_map:
+            canonical_events.append(event_map[eid])
+            
+    detected_signals = []
+    for sid in signal_ids:
+        if sid in signal_map:
+            sig = signal_map[sid]
+            detected_signals.append({
+                "detector_name": getattr(sig, 'rule_name', 'Unknown'),
+                "status": "alert",
+                "message": f"{getattr(sig, 'rule_name', 'Unknown')} detected. Severity: {getattr(sig, 'severity', 'low')}",
+                "matched_event_ids": getattr(sig, 'event_ids', [])
+            })
+            
+    candidate_evidence = []
+    for ev in evidence_list:
+        candidate_evidence.append({
+            "event_id": getattr(ev, 'event_id', ev.get('event_id') if isinstance(ev, dict) else None),
+            "quote": getattr(ev, 'quote', ev.get('quote') if isinstance(ev, dict) else ""),
+            "reason": getattr(ev, 'reason', ev.get('reason') if isinstance(ev, dict) else ""),
+            "source": getattr(ev, 'source', ev.get('source') if isinstance(ev, dict) else ""),
+            "original_fields": getattr(ev, 'original_fields', ev.get('original_fields') if isinstance(ev, dict) else {}),
+            "correlation_context": getattr(ev, 'correlation_context', ev.get('correlation_context') if isinstance(ev, dict) else {})
+        })
+        
+    return {
+        "incident_id": incident_id,
+        "canonical_events": canonical_events,
+        "messages": [],
+        "iteration_count": 0,
+        "mitre_techniques": [],
+        "candidate_evidence": candidate_evidence,
+        "detected_signals": detected_signals,
+        "search_history": [],
+        "tool_results": [],
+        "errors": [],
+        "detection_engine_executed": True
+    }
 
 def analyze_file(file_path: str):
     console.print(f"[bold blue]Starting File Analysis: {file_path}[/bold blue]")
@@ -96,49 +106,12 @@ def analyze_file(file_path: str):
     console.print(f"Detection engine generated {det_result.metrics.incident_count} incidents from {det_result.metrics.signal_count} signals.")
     
     event_map = {e.event_id: e.model_dump(mode="json") for e in ingest_result.events if e.event_id}
+    signal_map = {s.signal_id: s for s in det_result.signals}
     
     # 4. Graph Invocation
     for inc in det_result.incidents:
-        canonical_events = [event_map[eid] for eid in inc.event_ids if eid in event_map]
-        detected_signals = []
-        candidate_evidence = []
-        
-        # Resolve the signals that formed this incident
-        sig_list = [s for s in det_result.signals if s.signal_id in inc.signal_ids]
-        
-        for sig in sig_list:
-            detected_signals.append({
-                "detector_name": sig.rule_name,
-                "status": "alert",
-                "message": f"{sig.rule_name} detected targeting {len(sig.target_entities)} entities. Severity: {sig.severity}",
-                "matched_event_ids": sig.event_ids
-            })
-        
-        # Merge evidence from the new incident bundle
-        for ev in inc.evidence:
-            candidate_evidence.append({
-                "event_id": ev.event_id,
-                "quote": ev.quote,
-                "reason": ev.reason,
-                "source": ev.source,
-                "original_fields": ev.original_fields,
-                "correlation_context": ev.correlation_context
-            })
-                
-        initial_state: IncidentState = {
-            "incident_id": inc.incident_id,
-            "canonical_events": canonical_events,
-            "messages": [],
-            "iteration_count": 0,
-            "mitre_techniques": [],
-            "candidate_evidence": candidate_evidence,
-            "detected_signals": detected_signals,
-            "search_history": [],
-            "tool_results": [],
-            "errors": []
-        }
-        
-        run_incident_graph(initial_state)
+        initial_state = run_graph_from_incident(inc, event_map, signal_map)
+        run_graph_from_state(initial_state)
         print("\n" + "="*50 + "\n")
 
 def run_mock_test():
@@ -167,8 +140,27 @@ def run_mock_test():
             if "event_id" not in log:
                 log["event_id"] = f"{incident_id}-E{i+1:03d}"
                 
-        # We pass raw_logs and let run_incident_graph normalize them via IngestionPipeline
-        run_incident_graph({"incident_id": incident_id}, raw_logs)
+        # Convert mock logs to canonical format and state
+        from agent.ingestion.pipeline import IngestionPipeline
+        c_events = IngestionPipeline().ingest_records(raw_logs, source_name="mock_incidents").events
+        event_map = {e.event_id: e.model_dump(mode="json") for e in c_events}
+        
+        class FakeIncident:
+            def __init__(self, incident_id, events):
+                self.incident_id = incident_id
+                self.event_ids = [e.event_id for e in events]
+                self.signal_ids = []
+                self.evidence = [
+                    {
+                        "event_id": e.event_id,
+                        "quote": e.raw_message or "",
+                        "original_fields": e.original_log
+                    } for e in events
+                ]
+                
+        inc = FakeIncident(incident_id, c_events)
+        initial_state = run_graph_from_incident(inc, event_map, {})
+        run_graph_from_state(initial_state)
             
         if not run_all:
             print("\n[INFO] Breaking early after 1 incident. Set RUN_ALL=true in .env to run all.")

@@ -1,10 +1,12 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional, Union, Literal
 import hashlib
 
+SeverityType = Literal["informational", "low", "medium", "high", "critical"]
+
 class DetectionEvidence(BaseModel):
-    event_id: str
+    event_id: str = Field(min_length=1)
     quote: str
     reason: str
     source: str
@@ -12,14 +14,14 @@ class DetectionEvidence(BaseModel):
     correlation_context: Dict[str, object]
 
 class DetectionSignal(BaseModel):
-    signal_id: str
-    rule_id: str
+    signal_id: str = Field(min_length=1)
+    rule_id: str = Field(min_length=1)
     rule_version: str
     rule_name: str
     signal_type: str
     signal_family: str
-    severity: str
-    confidence: float
+    severity: SeverityType
+    confidence: float = Field(ge=0.0, le=1.0)
     first_seen: datetime
     last_seen: datetime
     event_ids: List[str]
@@ -31,14 +33,25 @@ class DetectionSignal(BaseModel):
     tags: List[str]
     suppressed: bool = False
     suppression_reason: Optional[str] = None
+    
+    @model_validator(mode='after')
+    def validate_times(self) -> 'DetectionSignal':
+        if self.first_seen > self.last_seen:
+            raise ValueError("first_seen must be <= last_seen")
+        return self
+        
+    @field_validator('event_ids', 'target_entities', mode='after')
+    @classmethod
+    def sort_and_dedup_lists(cls, v: List[str]) -> List[str]:
+        return sorted(set(v))
 
 class IncidentBundle(BaseModel):
-    incident_id: str
+    incident_id: str = Field(min_length=1)
     incident_type: str
     incident_family: str
     title: str
-    severity: str
-    confidence: float
+    severity: SeverityType
+    confidence: float = Field(ge=0.0, le=1.0)
     first_seen: datetime
     last_seen: datetime
     primary_entity: str
@@ -51,6 +64,23 @@ class IncidentBundle(BaseModel):
     mitre_techniques: List[str]
     merge_key: str
     review_reason: Optional[str] = None
+    absorbed_signal_ids: List[str] = Field(default_factory=list)
+    
+    @model_validator(mode='after')
+    def validate_times_and_events(self) -> 'IncidentBundle':
+        if self.first_seen > self.last_seen:
+            raise ValueError("first_seen must be <= last_seen")
+        context_set = set(self.context_event_ids)
+        for eid in self.event_ids:
+            if eid in context_set:
+                raise ValueError(f"Incident event {eid} cannot also be a context event")
+        return self
+        
+    @field_validator('signal_ids', 'event_ids', 'context_event_ids', 'target_entities', 'absorbed_signal_ids', mode='after')
+    @classmethod
+    def sort_and_dedup_lists(cls, v: List[str]) -> List[str]:
+        return sorted(set(v))
+
 
 class DetectionMetrics(BaseModel):
     total_events: int = 0

@@ -183,18 +183,57 @@ async def detect_file(file: UploadFile = File(...)):
         
         det_result = detection_engine.analyze(filter_result.candidates, filter_result.context)
         
+        # Sanitize output for public endpoint
+        safe_incidents = []
+        for i in det_result.incidents:
+            safe_incidents.append({
+                "incident_id": i.incident_id,
+                "incident_type": i.incident_type,
+                "severity": i.severity,
+                "confidence": i.confidence,
+                "first_seen": i.first_seen.isoformat() if i.first_seen else None,
+                "last_seen": i.last_seen.isoformat() if i.last_seen else None,
+                "event_count": len(i.event_ids),
+                "signal_count": len(i.signal_ids),
+                "target_count": len(i.target_entities)
+            })
+            
+        safe_signals = []
+        for s in det_result.signals:
+            safe_signals.append({
+                "signal_id": s.signal_id,
+                "rule_name": s.rule_name,
+                "severity": s.severity,
+                "confidence": s.confidence,
+                "event_count": len(s.event_ids),
+                "target_count": len(s.target_entities)
+            })
+            
         return {
-            "ingestion_metrics": ingest_result.metrics.model_dump(),
-            "filtering_metrics": filter_result.metrics,
-            "detection_metrics": det_result.metrics.model_dump(),
-            "signals": [s.model_dump() for s in det_result.signals],
-            "incidents": [i.model_dump() for i in det_result.incidents],
-            "suppressed_signals": [s.model_dump() for s in det_result.suppressed_signals],
+            "ingestion": {
+                "total_records": ingest_result.metrics.total_records,
+                "parsed_records": ingest_result.metrics.parsed_records,
+                "failed_records": ingest_result.metrics.failed_records,
+                "unsupported_records": ingest_result.metrics.unsupported_records
+            },
+            "detection": {
+                "eligible_events": det_result.metrics.eligible_events,
+                "skipped_events": det_result.metrics.skipped_events,
+                "duplicate_events": getattr(det_result.metrics, 'duplicate_event_count', 0),
+                "signal_count": det_result.metrics.signal_count,
+                "suppressed_signal_count": det_result.metrics.suppressed_signal_count,
+                "incident_count": det_result.metrics.incident_count,
+                "merge_count": getattr(det_result.metrics, 'merge_count', 0),
+                "duration_ms": det_result.metrics.duration_ms
+            },
+            "incidents": safe_incidents,
+            "signals_summary": safe_signals,
             "warnings": det_result.warnings
         }
     except Exception as e:
-        print(f"Error in /detect/file: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        import logging
+        logging.error(f"Error in /detect/file: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="internal_error")
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)

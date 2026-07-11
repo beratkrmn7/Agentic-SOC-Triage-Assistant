@@ -18,6 +18,8 @@ class DetectionSettings(BaseModel):
     VERTICAL_SCAN_WINDOW_SECONDS: int = int(os.getenv("VERTICAL_SCAN_WINDOW_SECONDS", "300"))
     VERTICAL_SCAN_MIN_EVENTS: int = int(os.getenv("VERTICAL_SCAN_MIN_EVENTS", "10"))
     VERTICAL_SCAN_MIN_DISTINCT_PORTS: int = int(os.getenv("VERTICAL_SCAN_MIN_DISTINCT_PORTS", "8"))
+    VERTICAL_SCAN_MIN_BLOCK_RATIO: float = float(os.getenv("VERTICAL_SCAN_MIN_BLOCK_RATIO", "0.60"))
+    VERTICAL_SCAN_MIN_SYN_RATIO: float = float(os.getenv("VERTICAL_SCAN_MIN_SYN_RATIO", "0.50"))
 
     # Remote Service Probe (RDP/SSH)
     REMOTE_SERVICE_WINDOW_SECONDS: int = int(os.getenv("REMOTE_SERVICE_WINDOW_SECONDS", "300"))
@@ -26,11 +28,13 @@ class DetectionSettings(BaseModel):
     REMOTE_SERVICE_MIN_EVENTS: int = int(os.getenv("REMOTE_SERVICE_MIN_EVENTS", "5"))
     REMOTE_SERVICE_MIN_DISTINCT_TARGETS: int = int(os.getenv("REMOTE_SERVICE_MIN_DISTINCT_TARGETS", "3"))
     REMOTE_SERVICE_MIN_BLOCK_RATIO: float = float(os.getenv("REMOTE_SERVICE_MIN_BLOCK_RATIO", "0.60"))
+    REMOTE_SERVICE_MIN_SYN_RATIO: float = float(os.getenv("REMOTE_SERVICE_MIN_SYN_RATIO", "0.50"))
 
     # SPI Anomaly
     SPI_ANOMALY_WINDOW_SECONDS: int = int(os.getenv("SPI_ANOMALY_WINDOW_SECONDS", "300"))
     SPI_ANOMALY_MIN_EVENTS: int = int(os.getenv("SPI_ANOMALY_MIN_EVENTS", "5"))
-    SPI_ANOMALY_MIN_DISTINCT_TARGETS: int = int(os.getenv("SPI_ANOMALY_MIN_DISTINCT_TARGETS", "2"))
+    SPI_ANOMALY_MIN_DISTINCT_TARGETS: int = int(os.getenv("SPI_ANOMALY_MIN_DISTINCT_TARGETS", "1"))
+    SPI_ANOMALY_FALLBACK_RAW_MATCH: bool = os.getenv("SPI_ANOMALY_FALLBACK_RAW_MATCH", "true").lower() == "true"
 
     # Network Flood
     NETWORK_FLOOD_WINDOW_SECONDS: int = int(os.getenv("NETWORK_FLOOD_WINDOW_SECONDS", "60"))

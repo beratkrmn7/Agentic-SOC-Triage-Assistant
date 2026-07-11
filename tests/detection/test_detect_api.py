@@ -9,4 +9,4 @@ def test_detect_api(tmp_path):
     with open(log_file, "rb") as f:
         response = client.post("/detect/file", files={"file": ("test.jsonl", f, "application/jsonl")})
     assert response.status_code == 200
-    assert "detection_metrics" in response.json()
+    assert "detection" in response.json()

@@ -1,4 +1,5 @@
-from typing import List, Optional, Literal, TypedDict, Annotated, Dict, Any, NotRequired
+
+from typing import List, Optional, Literal, TypedDict, Annotated, Dict, Any, NotRequired
 from pydantic import BaseModel, Field
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
@@ -102,11 +103,4 @@ class IncidentState(TypedDict):
     validated_evidence: NotRequired[List[dict]]
     rejected_evidence: NotRequired[List[dict]]
     
-    # Stage 3 Fields
-    triage_verdict: NotRequired[str]
-    incident_type: NotRequired[str]
-    severity: NotRequired[str]
-    confidence_score: NotRequired[float]
-    recommended_actions: NotRequired[List[str]]
-    evidence: NotRequired[List[dict]]
-    final_report: NotRequired[str]
+    detection_engine_executed: NotRequired[bool]

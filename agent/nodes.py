@@ -59,47 +59,37 @@ def automated_detection_node(state: IncidentState) -> dict:
     logger.info(f"--- PRE-ANALYSIS: Running automated detections for {state['incident_id']} ---")
     canonical_events_dict = state.get("canonical_events", [])
     
-    # 1. Run new Professional Detection Engine
-    from agent.schema import CanonicalLogEvent
-    from agent.detection.engine import DetectionEngine
-    
-    # Convert dicts back to models for engine
-    events = []
-    for cd in canonical_events_dict:
-        try:
-            events.append(CanonicalLogEvent(**cd))
-        except Exception:
-            pass
-            
-    engine = DetectionEngine()
-    det_result = engine.analyze(events)
-    
     detected_signals = list(state.get("detected_signals", []))
     candidate_evidence = list(state.get("candidate_evidence", []))
+
+    if not state.get("detection_engine_executed"):
+        # 1. Run new Professional Detection Engine
+        from agent.schema import CanonicalLogEvent
+        from agent.detection.engine import DetectionEngine
     
-    # Map new deterministic signals to graph state
-    for sig in det_result.signals:
-        if sig.suppressed:
-            continue
-        detected_signals.append({
-            "detector_name": sig.rule_name,
-            "status": "alert",
-            "message": f"{sig.rule_name} detected targeting {len(sig.target_entities)} entities. Severity: {sig.severity}, Confidence: {sig.confidence}",
-            "matched_event_ids": sig.event_ids
-        })
-        for ev in sig.evidence:
-            candidate_evidence.append(ev.model_dump())
+        # Convert dicts back to models for engine
+        events = []
+        for cd in canonical_events_dict:
+            try:
+                events.append(CanonicalLogEvent(**cd))
+            except Exception:
+                pass
             
-    # Map incidents to graph state if needed (can be part of candidate evidence or just let Triage agent read signals)
-    for inc in det_result.incidents:
-        candidate_evidence.append({
-            "event_id": f"INCIDENT-SUMMARY-{inc.incident_id}",
-            "quote": inc.title,
-            "reason": f"Correlated Incident {inc.incident_id} of type {inc.incident_type}",
-            "source": "CorrelationEngine",
-            "original_fields": {"severity": inc.severity, "confidence": inc.confidence, "metrics": inc.metrics},
-            "correlation_context": {}
-        })
+        engine = DetectionEngine()
+        det_result = engine.analyze(events)
+    
+        # Map new deterministic signals to graph state
+        for sig in det_result.signals:
+            if getattr(sig, 'suppressed', False):
+                continue
+            detected_signals.append({
+                "detector_name": sig.rule_name,
+                "status": "alert",
+                "message": f"{sig.rule_name} detected targeting {len(sig.target_entities)} entities. Severity: {sig.severity}, Confidence: {sig.confidence}",
+                "matched_event_ids": sig.event_ids
+            })
+            for ev in sig.evidence:
+                candidate_evidence.append(ev.model_dump())
 
     # 2. Run existing legacy heuristics for other categories
     event_types = set([log.get("event_type") for log in canonical_events_dict])

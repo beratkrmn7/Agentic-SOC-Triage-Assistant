@@ -20,7 +20,7 @@ def test_rdp_precedence():
     )
     engine = DetectionEngine(registry=registry, settings=settings)
     events = [
-        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(timezone.utc), src_ip="1.2.3.4", dst_ip=f"10.0.0.{i}", dst_port=3389, action="block", parser_name="test", parse_status="success")
+        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(timezone.utc), src_ip="1.2.3.4", dst_ip=f"10.0.0.{i}", dst_port=3389, action="block", parser_name="test", parse_status="success", protocol="TCP", tcp_flags="SYN")
         for i in range(2)
     ]
     res = engine.analyze(events)

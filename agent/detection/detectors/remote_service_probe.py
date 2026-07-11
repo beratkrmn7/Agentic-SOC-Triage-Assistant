@@ -27,6 +27,10 @@ class RemoteServiceProbeRule(BaseDetectionRule):
         for e in events:
             if not e.src_ip or e.dst_port not in target_ports:
                 continue
+            protocol = getattr(e, 'protocol', None)
+            if not protocol or str(protocol).upper() != "TCP":
+                continue
+                
             svc_type = "rdp" if e.dst_port in rdp_ports else "ssh"
             groups[(e.src_ip, svc_type)].append(e)
 
@@ -48,11 +52,16 @@ class RemoteServiceProbeRule(BaseDetectionRule):
                 if block_ratio < settings.REMOTE_SERVICE_MIN_BLOCK_RATIO:
                     return False, {}
                     
+                syn_count = sum(1 for e in window if getattr(e, "tcp_flags", None) == "SYN")
+                if syn_count / len(window) < settings.REMOTE_SERVICE_MIN_SYN_RATIO:
+                    return False, {}
+                    
                 # Note: We do NOT map T1110 (Brute Force) here because we lack authentication failure logs.
                 # We map T1046 (Network Service Scanning) and tag it with the specific service.
                 return True, {
                     "distinct_targets": len(distinct_targets),
                     "block_ratio": block_ratio,
+                    "syn_ratio": syn_count / len(window),
                     "event_count": len(window),
                     "service": svc_type
                 }
