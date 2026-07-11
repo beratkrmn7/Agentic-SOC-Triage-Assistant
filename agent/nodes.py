@@ -2,6 +2,7 @@ import json
 import re
 import datetime
 import logging
+from typing import Any, Optional
 from dotenv import load_dotenv
 
 from agent.config import get_settings
@@ -218,27 +219,48 @@ def triage_node(state: IncidentState) -> dict:
     
     # Needs the IncidentBundle to pass to runner
     from agent.models import IncidentBundle
-    
-    # We must construct an IncidentBundle dummy or from state to pass to runner.
+    # We must reconstruct the real IncidentBundle from the serialized dict state exactly.
     from agent.schema import CanonicalLogEvent
     bundle_events = []
+    
+    # Fallback for invalid events to be machine-readable instead of silent pass
     for cd in state.get("canonical_events", []):
         try:
             bundle_events.append(CanonicalLogEvent(**cd))
+        except Exception as e:
+            # Generate a machine-readable fallback for parser/data quality tracking
+            fallback = CanonicalLogEvent(
+                event_id=cd.get("event_id", "EVT-INVALID"),
+                observed_at=cd.get("observed_at", datetime.datetime.now(datetime.timezone.utc)),
+                parser_name="invalid_fallback",
+                source_name=cd.get("source_name", "unknown"),
+                raw_message=cd.get("raw_message", ""),
+                parse_status="failed",
+                parse_warnings=[f"Failed to load CanonicalLogEvent from state: {e}"]
+            )
+            bundle_events.append(fallback)
+
+    def _parse_dt(dt_str: object) -> Optional[datetime.datetime]:
+        if not dt_str:
+            return None
+        if isinstance(dt_str, datetime.datetime):
+            return dt_str
+        try:
+            return datetime.datetime.fromisoformat(str(dt_str).replace('Z', '+00:00'))
         except Exception:
-            pass
+            return None
 
     bundle = IncidentBundle(
         incident_id=state['incident_id'],
         incident_type_hint=state.get('incident_type', 'other'),
-        first_seen=None,
-        last_seen=None,
+        first_seen=_parse_dt(state.get('first_seen')),
+        last_seen=_parse_dt(state.get('last_seen')),
         source_ips=list(state.get('entities', {}).get('ips', [])),
-        destination_ips=[],
-        destination_ports=[],
-        event_ids=[e.get('event_id', '') for e in state.get('canonical_events', [])],
+        destination_ips=list(state.get('destination_ips', []) or []), # type: ignore
+        destination_ports=list(state.get('destination_ports', []) or []), # type: ignore
+        event_ids=list(state.get('event_ids', [e.event_id for e in bundle_events]) or []), # type: ignore
         events=bundle_events,
-        context_events=[]
+        context_events=[] # Phase 3 populates this separately if needed
     )
 
     try:
@@ -318,7 +340,6 @@ def evidence_validation_node(state: IncidentState) -> dict:
     valid_ev = [e for e in ev_results if e.status == "validated"]
     verdict = submission.triage_verdict.value
     
-    from typing import Any
     ret: dict[str, Any] = {
         "validated_evidence": [e.model_dump() for e in valid_ev],
         "rejected_evidence": [e.model_dump() for e in ev_results if e.status == "rejected"],

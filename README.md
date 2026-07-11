@@ -1,4 +1,4 @@
-# Agentic SOC Triage Assistant - Phase 4 (Secure Agentic Triage)
+# Agentic SOC Triage Assistant - Phase 4 (Secure Agentic Triage - IN PROGRESS)
 
 The system operates strictly as a **Triage Assistant**. It does not perform autonomous remediation (e.g., blocking IPs) or replace SIEM correlation rules. Its purpose is to contextualize alerts and accelerate analyst decision-making.
 
@@ -76,7 +76,7 @@ The final output is a concise SOC triage report focused on four questions:
 - Robust deduplication and alert suppression
 - Safe event context mapping
 
-### 4. Secure Agentic Triage (Phase 4) - **COMPLETED**
+### 4. Secure Agentic Triage (Phase 4) - **IN PROGRESS**
 - Abstracted Triage Provider interface for LLMs
 - Circuit Breaker pattern to handle repeated provider failures
 - Idempotent execution with max iteration limits

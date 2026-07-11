@@ -28,3 +28,19 @@ class ProviderAuthenticationError(TriageProviderError):
 class ProviderInvalidResponseError(TriageProviderError):
     def __init__(self, message="Provider returned invalid response"):
         super().__init__(message, ReviewReason.INVALID_LLM_OUTPUT)
+
+class ProviderMaxIterationsError(TriageProviderError):
+    def __init__(self, message="Maximum agent iterations reached"):
+        super().__init__(message, ReviewReason.MAXIMUM_ITERATIONS_REACHED)
+
+class ProviderMaxSearchCallsError(TriageProviderError):
+    def __init__(self, message="Maximum search calls reached"):
+        super().__init__(message, ReviewReason.MAXIMUM_SEARCH_CALLS_REACHED)
+
+class ProviderInvalidToolError(TriageProviderError):
+    def __init__(self, message="Invalid tool call"):
+        super().__init__(message, ReviewReason.INVALID_TOOL_CALL)
+
+class ProviderMixedToolsError(TriageProviderError):
+    def __init__(self, message="Mixed tool calls detected"):
+        super().__init__(message, ReviewReason.MIXED_TOOL_CALLS)

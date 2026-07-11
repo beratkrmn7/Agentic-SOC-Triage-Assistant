@@ -8,7 +8,9 @@ from agent.triage.exceptions import (
     ProviderTimeoutError,
     ProviderRateLimitError,
     ProviderAuthenticationError,
-    ProviderInvalidResponseError
+    ProviderInvalidResponseError,
+    ProviderMaxIterationsError,
+    ProviderMaxSearchCallsError
 )
 from agent.triage.retry import with_retry
 from agent.triage.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
@@ -21,16 +23,16 @@ from langchain_groq import ChatGroq
 import groq
 
 class GroqTriageProvider(TriageProvider):
-    def __init__(self, model_name: str = "llama3-70b-8192", circuit_breaker: Optional['CircuitBreaker'] = None):
+    def __init__(self, model_name: str = "llama3-70b-8192", circuit_breaker: Optional['CircuitBreaker'] = None, llm: Optional[Any] = None):
         self.settings = get_settings()
         self.circuit_breaker = circuit_breaker or CircuitBreaker()
         
         if not self.settings.llm_enabled:
             raise ProviderConfigurationError("LLM is disabled")
-        if not self.settings.groq_api_key:
+        if not self.settings.groq_api_key and not llm:
             raise ProviderConfigurationError("GROQ_API_KEY is missing")
             
-        self.llm = ChatGroq(
+        self.llm = llm or ChatGroq(
             model=self.settings.llm_model,
             temperature=0,
             api_key=self.settings.groq_api_key,
@@ -75,9 +77,9 @@ class GroqTriageProvider(TriageProvider):
             
         search_tool = SearchLogsTool(
             incident_events=triage_input.limited_context_events,
-            max_calls=3,
-            max_query_chars=100,
-            max_results=10
+            max_calls=self.settings.max_search_calls,
+            max_query_chars=self.settings.max_search_query_chars,
+            max_results=self.settings.max_search_results
         )
         
         # Tools definitions for Langchain
@@ -107,7 +109,7 @@ class GroqTriageProvider(TriageProvider):
         total_prompt_tokens = 0
         total_completion_tokens = 0
         
-        for iteration in range(5): # MAX_AGENT_ITERATIONS
+        for iteration in range(self.settings.max_agent_iterations):
             try:
                 ai_message = self._invoke_with_circuit_breaker(messages, tools)
             except CircuitBreakerOpenError as e:
@@ -125,7 +127,7 @@ class GroqTriageProvider(TriageProvider):
             
             if not ai_message.tool_calls:
                 # Force tool call or fail
-                if iteration == 4:
+                if iteration == self.settings.max_agent_iterations - 1:
                     raise ProviderInvalidResponseError("Max iterations reached without submission")
                 messages.append(HumanMessage(content="You must use the submit_triage_result tool to provide your final verdict."))
                 continue
@@ -145,7 +147,7 @@ class GroqTriageProvider(TriageProvider):
                             completion_tokens=total_completion_tokens
                         )
                     except Exception as e:
-                        if iteration == 4:
+                        if iteration == self.settings.max_agent_iterations - 1:
                             raise ProviderInvalidResponseError(f"Validation error: {e}")
                         messages.append(ToolMessage(tool_call_id=tool_call["id"], content=f"Schema Error: {str(e)}", name="submit_triage_result"))
                         
@@ -153,11 +155,11 @@ class GroqTriageProvider(TriageProvider):
                     try:
                         result_str = search_logs.invoke(tool_call["args"])
                         messages.append(ToolMessage(tool_call_id=tool_call["id"], content=result_str, name="search_logs"))
+                    except ProviderMaxSearchCallsError as e:
+                        raise e
                     except Exception as e:
-                        if "maximum_search_calls_reached" in str(e):
-                            raise TriageProviderError("Max search calls reached", ReviewReason.MAXIMUM_SEARCH_CALLS_REACHED)
                         messages.append(ToolMessage(tool_call_id=tool_call["id"], content=f"Error: {e}", name="search_logs"))
                 else:
                     raise TriageProviderError("Invalid tool call", ReviewReason.INVALID_TOOL_CALL)
 
-        raise TriageProviderError("Max iterations reached", ReviewReason.MAXIMUM_ITERATIONS_REACHED)
+        raise ProviderMaxIterationsError("Max iterations reached")

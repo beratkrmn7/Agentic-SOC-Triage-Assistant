@@ -32,16 +32,24 @@ def validate_claims(claims: List[TriageClaim], validated_evidence: List[Evidence
             continue
             
         # Check for supporting evidence
-        has_valid_support = False
+        all_support_valid = True
+        
         for ev_id in claim.supporting_evidence_ids:
-            if ev_id in valid_ev_ids:
-                has_valid_support = True
+            if ev_id not in valid_ev_ids:
+                all_support_valid = False
                 break
                 
-        if not has_valid_support:
+        if not claim.supporting_evidence_ids:
             rejected_claims.append({
                 "claim_id": claim.claim_id,
                 "reason": RejectionReason.MISSING_SUPPORTING_EVIDENCE.value
+            })
+            continue
+            
+        if not all_support_valid:
+            rejected_claims.append({
+                "claim_id": claim.claim_id,
+                "reason": RejectionReason.EVIDENCE_REJECTED.value
             })
             continue
             

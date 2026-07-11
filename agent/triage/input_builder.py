@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from agent.models import IncidentBundle
 from agent.triage.models import TriageInput, SafeEventView, EvidenceCandidate
 from agent.schema import CanonicalLogEvent

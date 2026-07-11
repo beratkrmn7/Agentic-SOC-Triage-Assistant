@@ -63,42 +63,89 @@ class TriageRunner:
             context={"triage_input": triage_input}
         )
         
-        # 3. Invoke Provider
+        # 3. Invoke Provider with global deadline checks
+        timeout_seconds = self.settings.triage_timeout_seconds
+        
         try:
+            # Check deadline before invocation
+            if time.monotonic() - start_time > timeout_seconds:
+                raise Exception("triage_timeout")
+                
             response = self.provider.invoke(request)
             
             metrics.provider_prompt_tokens = response.prompt_tokens
             metrics.provider_completion_tokens = response.completion_tokens
             metrics.total_tokens = response.prompt_tokens + response.completion_tokens
             
-            # The provider should abstract away the tool loops internally,
-            # or if graph handles loops, the provider does 1 step. 
-            # To meet phase 4 bounded requirements without infinite graph loops,
-            # the Fake/Groq provider will handle search limit loops securely.
+            # Re-check deadline after invocation
+            if time.monotonic() - start_time > timeout_seconds:
+                raise Exception("triage_timeout")
             
             result = TriageRunResult(
                 submission=response.submission,
                 review_reason=ReviewReason.NONE if response.submission else ReviewReason.INVALID_LLM_OUTPUT,
                 metrics=metrics,
-                search_results=[] # provider can return them if it wants
+                search_results=[] 
             )
             
         except TriageProviderError as e:
             metrics.fallback_used = True
             metrics.review_reason = e.review_reason
-            result = TriageRunResult(
-                submission=None,
-                review_reason=e.review_reason,
-                metrics=metrics
-            )
-        except Exception:
+            
+            # Map timeout from provider specifically
+            if e.review_reason == ReviewReason.PROVIDER_TIMEOUT:
+                from agent.triage.models import TriageSubmission
+                from agent.triage.enums import TriageVerdict, TriageSeverity
+                
+                result = TriageRunResult(
+                    submission=TriageSubmission(
+                        triage_verdict=TriageVerdict.NEEDS_REVIEW,
+                        incident_type="other",
+                        severity=TriageSeverity.NONE,
+                        confidence_score=0.0,
+                        summary="Provider request timed out.",
+                        selected_evidence_ids=[],
+                        claims=[]
+                    ),
+                    review_reason=ReviewReason.PROVIDER_TIMEOUT,
+                    metrics=metrics
+                )
+            else:
+                result = TriageRunResult(
+                    submission=None,
+                    review_reason=e.review_reason,
+                    metrics=metrics
+                )
+        except Exception as e:
+            print(f"TriageRunner Exception: {type(e)} - {str(e)}")
             metrics.fallback_used = True
-            metrics.review_reason = ReviewReason.PROVIDER_UNAVAILABLE
-            result = TriageRunResult(
-                submission=None,
-                review_reason=ReviewReason.PROVIDER_UNAVAILABLE,
-                metrics=metrics
-            )
+            
+            # Check for global triage timeout
+            if str(e) == "triage_timeout":
+                metrics.review_reason = ReviewReason.PROVIDER_TIMEOUT
+                from agent.triage.models import TriageSubmission
+                from agent.triage.enums import TriageVerdict, TriageSeverity
+                
+                result = TriageRunResult(
+                    submission=TriageSubmission(
+                        triage_verdict=TriageVerdict.NEEDS_REVIEW,
+                        incident_type="other",
+                        severity=TriageSeverity.NONE,
+                        confidence_score=0.0,
+                        summary="Global triage timeout exceeded.",
+                        selected_evidence_ids=[],
+                        claims=[]
+                    ),
+                    review_reason=ReviewReason.PROVIDER_TIMEOUT, # Map to provider_timeout or triage_timeout depending on enum. But review reason only has PROVIDER_TIMEOUT for now
+                    metrics=metrics
+                )
+            else:
+                metrics.review_reason = ReviewReason.PROVIDER_UNAVAILABLE
+                result = TriageRunResult(
+                    submission=None,
+                    review_reason=ReviewReason.PROVIDER_UNAVAILABLE,
+                    metrics=metrics
+                )
             
         metrics.completed_at = time.time().__str__()
         metrics.latency_ms = (time.monotonic() - start_time) * 1000.0
