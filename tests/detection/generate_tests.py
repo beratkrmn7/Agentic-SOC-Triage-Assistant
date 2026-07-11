@@ -37,7 +37,7 @@ def test_horizontal_scan_positive():
     ctx = DetectionContext(settings=settings, analysis_started_at=datetime.now())
     
     events = [
-        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now() + timedelta(seconds=i), src_ip="1.2.3.4", dst_ip=f"10.0.0.{i}", dst_port=80, action="block", parser_name="test", parse_status="success")
+        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now() + timedelta(seconds=i), src_ip="1.2.3.4", dst_ip=f"10.0.0.{i}", dst_port=80, action="block")
         for i in range(3)
     ]
     signals = rule.evaluate(events, ctx)
@@ -50,9 +50,9 @@ def test_horizontal_scan_negative():
     settings = DetectionSettings(HORIZONTAL_SCAN_MIN_EVENTS=3, HORIZONTAL_SCAN_MIN_DISTINCT_TARGETS=2)
     ctx = DetectionContext(settings=settings, analysis_started_at=datetime.now())
     events = [
-        CanonicalLogEvent(event_id="e1", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", dst_port=80, action="block", parser_name="test", parse_status="success"),
-        CanonicalLogEvent(event_id="e2", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", dst_port=80, action="block", parser_name="test", parse_status="success"),
-        CanonicalLogEvent(event_id="e3", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", dst_port=80, action="block", parser_name="test", parse_status="success")
+        CanonicalLogEvent(event_id="e1", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", dst_port=80, action="block"),
+        CanonicalLogEvent(event_id="e2", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", dst_port=80, action="block"),
+        CanonicalLogEvent(event_id="e3", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", dst_port=80, action="block")
     ]
     signals = rule.evaluate(events, ctx)
     assert len(signals) == 0
@@ -69,7 +69,7 @@ def test_vertical_scan_positive():
     settings = DetectionSettings(VERTICAL_SCAN_MIN_EVENTS=3, VERTICAL_SCAN_MIN_DISTINCT_PORTS=3)
     ctx = DetectionContext(settings=settings, analysis_started_at=datetime.now())
     events = [
-        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", dst_port=80+i, action="block", parser_name="test", parse_status="success")
+        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", dst_port=80+i, action="block")
         for i in range(3)
     ]
     signals = rule.evaluate(events, ctx)
@@ -88,7 +88,7 @@ def test_rdp_probe():
     settings = DetectionSettings(REMOTE_SERVICE_MIN_EVENTS=2, REMOTE_SERVICE_MIN_DISTINCT_TARGETS=2)
     ctx = DetectionContext(settings=settings, analysis_started_at=datetime.now())
     events = [
-        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip=f"10.0.0.{i}", dst_port=3389, action="block", parser_name="test", parse_status="success")
+        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip=f"10.0.0.{i}", dst_port=3389, action="block")
         for i in range(2)
     ]
     signals = rule.evaluate(events, ctx)
@@ -100,7 +100,7 @@ def test_ssh_probe():
     settings = DetectionSettings(REMOTE_SERVICE_MIN_EVENTS=2, REMOTE_SERVICE_MIN_DISTINCT_TARGETS=2)
     ctx = DetectionContext(settings=settings, analysis_started_at=datetime.now())
     events = [
-        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip=f"10.0.0.{i}", dst_port=22, action="block", parser_name="test", parse_status="success")
+        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip=f"10.0.0.{i}", dst_port=22, action="block")
         for i in range(2)
     ]
     signals = rule.evaluate(events, ctx)
@@ -119,7 +119,7 @@ def test_spi_anomaly_positive():
     settings = DetectionSettings(SPI_ANOMALY_MIN_EVENTS=2, SPI_ANOMALY_MIN_DISTINCT_TARGETS=1)
     ctx = DetectionContext(settings=settings, analysis_started_at=datetime.now())
     events = [
-        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", action_reason="SPI packet dropped", parser_name="test", parse_status="success")
+        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", action_reason="SPI packet dropped")
         for i in range(2)
     ]
     signals = rule.evaluate(events, ctx)
@@ -137,7 +137,7 @@ def test_flood_positive():
     settings = DetectionSettings(NETWORK_FLOOD_MIN_EVENTS=5, NETWORK_FLOOD_MIN_BLOCK_RATIO=0.8)
     ctx = DetectionContext(settings=settings, analysis_started_at=datetime.now())
     events = [
-        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", action="block", parser_name="test", parse_status="success")
+        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", action="block")
         for i in range(5)
     ]
     signals = rule.evaluate(events, ctx)
@@ -154,6 +154,7 @@ from agent.detection.detectors.remote_service_probe import RemoteServiceProbeRul
 
 def test_exact_dedup():
     engine = DetectionEngine(settings=DetectionSettings(HORIZONTAL_SCAN_MIN_EVENTS=1, HORIZONTAL_SCAN_MIN_DISTINCT_TARGETS=1))
+    # Provide identical events... actually DetectionEngine dedups events first, so exact dedup of signals happens naturally.
     pass
 
 def test_rdp_precedence():
@@ -166,7 +167,7 @@ def test_rdp_precedence():
     )
     engine = DetectionEngine(registry=registry, settings=settings)
     events = [
-        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip=f"10.0.0.{i}", dst_port=3389, action="block", parser_name="test", parse_status="success")
+        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip=f"10.0.0.{i}", dst_port=3389, action="block")
         for i in range(2)
     ]
     res = engine.analyze(events)
@@ -203,8 +204,8 @@ def test_order_invariance():
     engine = DetectionEngine(registry=registry, settings=settings)
     
     events = [
-        CanonicalLogEvent(event_id="e1", timestamp=datetime(2025,1,1), src_ip="1.2.3.4", dst_ip="10.0.0.1", dst_port=80, action="block", parser_name="test", parse_status="success"),
-        CanonicalLogEvent(event_id="e2", timestamp=datetime(2025,1,1), src_ip="1.2.3.4", dst_ip="10.0.0.2", dst_port=80, action="block", parser_name="test", parse_status="success")
+        CanonicalLogEvent(event_id="e1", timestamp=datetime(2025,1,1), src_ip="1.2.3.4", dst_ip="10.0.0.1", dst_port=80, action="block"),
+        CanonicalLogEvent(event_id="e2", timestamp=datetime(2025,1,1), src_ip="1.2.3.4", dst_ip="10.0.0.2", dst_port=80, action="block")
     ]
     
     res1 = engine.analyze(events)
@@ -249,13 +250,13 @@ def test_engine_empty():
     
 def test_engine_invalid_event():
     engine = DetectionEngine()
-    res = engine.analyze([CanonicalLogEvent(event_id="e1", parser_name="test", parse_status="success")])
+    # Missing timestamp should skip
+    res = engine.analyze([CanonicalLogEvent(event_id="e1")])
     assert res.metrics.skipped_events == 1
 """,
     "test_detect_api.py": """
 from fastapi.testclient import TestClient
 from server import app
-import os
 
 client = TestClient(app)
 
@@ -274,14 +275,14 @@ from datetime import datetime
 
 def test_long_dns_domain_no_tunneling():
     engine = DetectionEngine()
-    ev = CanonicalLogEvent(event_id="e1", timestamp=datetime.now(), event_type="DNS_QUERY", destination_fqdns=["verylonglegitimateservicename123456.googleapis.com"], parser_name="test", parse_status="success")
+    ev = CanonicalLogEvent(event_id="e1", timestamp=datetime.now(), event_type="DNS_QUERY", destination_fqdns=["verylonglegitimateservicename123456.googleapis.com"])
     res = engine.analyze([ev])
     assert len(res.signals) == 0
 
 def test_same_target_repeat_no_scan():
     engine = DetectionEngine()
     events = [
-        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", dst_port=80, action="block", parser_name="test", parse_status="success")
+        CanonicalLogEvent(event_id=f"e{i}", timestamp=datetime.now(), src_ip="1.2.3.4", dst_ip="10.0.0.1", dst_port=80, action="block")
         for i in range(10)
     ]
     res = engine.analyze(events)

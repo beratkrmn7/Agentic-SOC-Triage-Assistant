@@ -166,13 +166,45 @@ def ingest_file_only(file_path: str):
         for w in result.warnings:
             console.print(f"  - {w}")
 
+def detect_file_only(file_path: str):
+    console.print(f"[bold blue]Starting File Detection: {file_path}[/bold blue]")
+    
+    ingest = IngestionPipeline()
+    result = ingest.ingest_file(file_path)
+    
+    from agent.detection.engine import DetectionEngine
+    engine = DetectionEngine()
+    
+    console.print("[bold blue]Running Detection Engine...[/bold blue]")
+    det_result = engine.analyze(result.events)
+    
+    console.print("\n[bold cyan]--- DETECTION SUMMARY ---[/bold cyan]")
+    console.print(f"Total Canonical Events: {det_result.metrics.total_events}")
+    console.print(f"Eligible Events: {det_result.metrics.eligible_events}")
+    console.print(f"Skipped Events: {det_result.metrics.skipped_events}")
+    console.print(f"Signal Count: {det_result.metrics.signal_count}")
+    console.print(f"Suppressed Signal Count: {det_result.metrics.suppressed_signal_count}")
+    console.print(f"Incident Count: {det_result.metrics.incident_count}")
+    console.print(f"Duplicate Signal Count: {det_result.metrics.duplicate_signal_count}")
+    console.print(f"Duration: {det_result.metrics.duration_ms:.2f} ms")
+    
+    if det_result.incidents:
+        console.print("\n[bold]Generated Incidents (Sample of max 3):[/bold]")
+        for inc in det_result.incidents[:3]:
+            console.print(f"  - {inc.incident_id} ({inc.incident_type}): {inc.title}")
+            console.print(f"    Severity: {inc.severity}, Confidence: {inc.confidence:.2f}")
+            console.print(f"    Events: {len(inc.event_ids)}, Signals: {len(inc.signal_ids)}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SOC Triage Assistant CLI")
     parser.add_argument("--file", type=str, help="Path to JSONL log file to analyze end-to-end")
     parser.add_argument("--ingest-file", type=str, help="Path to file to only run ingestion and print summary")
+    parser.add_argument("--detect-file", type=str, help="Path to file to only run deterministic detection and print summary")
     args = parser.parse_args()
     
-    if args.ingest_file:
+    if args.detect_file:
+        detect_file_only(args.detect_file)
+    elif args.ingest_file:
         ingest_file_only(args.ingest_file)
     elif args.file:
         analyze_file(args.file)

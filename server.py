@@ -165,6 +165,55 @@ async def ingest_file(file: UploadFile = File(...)):
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
+@app.post("/detect/file")
+async def detect_file(file: UploadFile = File(...)):
+    """
+    Run the deterministic Detection Engine over a log file.
+    Does not call the LLM triage agent.
+    """
+    temp_path = await secure_save_upload(file)
+    try:
+        ingest = IngestionPipeline()
+        result = ingest.ingest_file(temp_path)
+        
+        from agent.detection.engine import DetectionEngine
+        engine = DetectionEngine()
+        det_result = engine.analyze(result.events)
+        
+        incidents_out = []
+        for inc in det_result.incidents:
+            incidents_out.append({
+                "incident_id": inc.incident_id,
+                "incident_type": inc.incident_type,
+                "severity": inc.severity,
+                "confidence": inc.confidence,
+                "first_seen": inc.first_seen.isoformat() if inc.first_seen else None,
+                "last_seen": inc.last_seen.isoformat() if inc.last_seen else None,
+                "event_count": len(inc.event_ids),
+                "signal_count": len(inc.signal_ids),
+                "primary_entity": inc.primary_entity
+            })
+            
+        return {
+            "ingestion": {
+                "total_records": result.metrics.total_records,
+                "parsed_records": result.metrics.parsed_records,
+                "failed_records": result.metrics.failed_records,
+                "unsupported_records": result.metrics.unsupported_records
+            },
+            "detection": {
+                "signal_count": det_result.metrics.signal_count,
+                "suppressed_signal_count": det_result.metrics.suppressed_signal_count,
+                "incident_count": det_result.metrics.incident_count,
+                "merge_count": det_result.metrics.merge_count,
+                "duration_ms": det_result.metrics.duration_ms
+            },
+            "incidents": incidents_out
+        }
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
 @app.post("/analyze/file")
 async def analyze_file(file: UploadFile = File(...)):
     """

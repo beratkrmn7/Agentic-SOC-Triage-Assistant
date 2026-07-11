@@ -60,46 +60,83 @@ def automated_detection_node(state: IncidentState) -> dict:
     Deterministically runs detection rules based on event types and populates signals and evidence.
     """
     logger.info(f"--- PRE-ANALYSIS: Running automated detections for {state['incident_id']} ---")
-    canonical_events = state.get("canonical_events", [])
-    event_types = set([log.get("event_type") for log in canonical_events])
+    canonical_events_dict = state.get("canonical_events", [])
     
+    # 1. Run new Professional Detection Engine
+    from agent.schema import CanonicalLogEvent
+    from agent.detection.engine import DetectionEngine
+    
+    # Convert dicts back to models for engine
+    events = []
+    for cd in canonical_events_dict:
+        try:
+            events.append(CanonicalLogEvent(**cd))
+        except Exception:
+            pass
+            
+    engine = DetectionEngine()
+    det_result = engine.analyze(events)
+    
+    detected_signals = list(state.get("detected_signals", []))
+    candidate_evidence = list(state.get("candidate_evidence", []))
+    
+    # Map new deterministic signals to graph state
+    for sig in det_result.signals:
+        if sig.suppressed:
+            continue
+        detected_signals.append({
+            "detector_name": sig.rule_name,
+            "status": "alert",
+            "message": f"{sig.rule_name} detected targeting {len(sig.target_entities)} entities. Severity: {sig.severity}, Confidence: {sig.confidence}",
+            "matched_event_ids": sig.event_ids
+        })
+        for ev in sig.evidence:
+            candidate_evidence.append(ev.model_dump())
+            
+    # Map incidents to graph state if needed (can be part of candidate evidence or just let Triage agent read signals)
+    for inc in det_result.incidents:
+        candidate_evidence.append({
+            "event_id": f"INCIDENT-SUMMARY-{inc.incident_id}",
+            "quote": inc.title,
+            "reason": f"Correlated Incident {inc.incident_id} of type {inc.incident_type}",
+            "source": "CorrelationEngine",
+            "original_fields": {"severity": inc.severity, "confidence": inc.confidence, "metrics": inc.metrics},
+            "correlation_context": {}
+        })
+
+    # 2. Run existing legacy heuristics for other categories
+    event_types = set([log.get("event_type") for log in canonical_events_dict])
     automated_results = []
     
     if "SSH_AUTH" in event_types:
-        automated_results.append(detect_bruteforce_pattern(canonical_events))
-        automated_results.append(detect_failed_then_success_login(canonical_events))
+        automated_results.append(detect_bruteforce_pattern(canonical_events_dict))
+        automated_results.append(detect_failed_then_success_login(canonical_events_dict))
         
     if "HTTP_GET" in event_types or "HTTP_POST" in event_types:
-        automated_results.append(detect_sqli_patterns(canonical_events))
-        automated_results.append(detect_xss_patterns(canonical_events))
-        automated_results.append(detect_benign_web_traffic(canonical_events))
-        automated_results.append(detect_normal_admin_login(canonical_events))
-        
-    if "DNS_QUERY" in event_types:
-        automated_results.append(detect_dns_tunneling_pattern(canonical_events))
+        automated_results.append(detect_sqli_patterns(canonical_events_dict))
+        automated_results.append(detect_xss_patterns(canonical_events_dict))
+        automated_results.append(detect_benign_web_traffic(canonical_events_dict))
+        automated_results.append(detect_normal_admin_login(canonical_events_dict))
         
     if "EDR_ALERT" in event_types:
-        automated_results.append(detect_malware_hash_alert(canonical_events))
-        
-    if "FIREWALL" in event_types or "BLOCK TCP" in str(canonical_events).upper():
-        automated_results.append(detect_port_scan_pattern(canonical_events))
-        automated_results.append(detect_network_flood(canonical_events))
+        automated_results.append(detect_malware_hash_alert(canonical_events_dict))
         
     if "SMB_ACCESS" in event_types or "SERVICE_CREATE" in event_types:
-        automated_results.append(detect_lateral_movement_pattern(canonical_events))
+        automated_results.append(detect_lateral_movement_pattern(canonical_events_dict))
         
     if "PROCESS_CREATE" in event_types or "BASH_CMD" in event_types:
-        automated_results.append(detect_suspicious_commands(canonical_events))
+        automated_results.append(detect_suspicious_commands(canonical_events_dict))
         
     # Always check for backup agent
-    automated_results.append(detect_backup_false_positive(canonical_events))
+    automated_results.append(detect_backup_false_positive(canonical_events_dict))
+    
+    # Note: detect_dns_tunneling_pattern, detect_port_scan_pattern, and detect_network_flood 
+    # were replaced/disabled in Phase 3.
     
     # Filter out empty/clean results to save context
     meaningful_results = [res for res in automated_results if res.get("status") != "clean"]
     
     timestamp = datetime.datetime.now().isoformat()
-    detected_signals = list(state.get("detected_signals", []))
-    candidate_evidence = list(state.get("candidate_evidence", []))
     
     for res in meaningful_results:
         detected_signals.append({
