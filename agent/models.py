@@ -86,27 +86,45 @@ class IncidentState(TypedDict):
     The shared state for the LangGraph state machine.
     """
     incident_id: str
+    incident: NotRequired[dict]
     canonical_events: List[dict]
     messages: Annotated[list[AnyMessage], add_messages]
     iteration_count: int
+    search_call_count: NotRequired[int]
+    tool_call_count: NotRequired[int]
     mitre_techniques: List[str]
     candidate_evidence: List[dict]
     detected_signals: List[dict]
+    safe_triage_input: NotRequired[dict]
     
     # State fields added in Phase 3 - Stage 1
     search_history: Annotated[List[dict], append_list]
     tool_results: Annotated[List[dict], append_list]
     errors: Annotated[List[str], append_list]
     
-    # Stage 2 Fields
-    entities: NotRequired[dict]
-    validated_evidence: NotRequired[List[dict]]
-    rejected_evidence: NotRequired[List[dict]]
-    evidence: NotRequired[List[dict]]
+    # Phase 4 Submission state
+    triage_submission: NotRequired[dict]
     triage_verdict: NotRequired[str]
     incident_type: NotRequired[str]
     severity: NotRequired[str]
-    confidence: NotRequired[float]
-    recommended_actions: NotRequired[List[Any]]
+    confidence_score: NotRequired[float]
+    review_reason: NotRequired[str]
     
+    # Evidence & Claims
+    validated_evidence: NotRequired[List[dict]]
+    rejected_evidence: NotRequired[List[dict]]
+    claims: NotRequired[List[dict]]
+    validated_claims: NotRequired[List[dict]]
+    rejected_claims: NotRequired[List[dict]]
+    
+    # Triage Metrics & Cache
+    provider_metrics: NotRequired[dict]
+    triage_metrics: NotRequired[dict]
+    cache_key: NotRequired[str]
+    cache_hit: NotRequired[bool]
+    
+    # Extras
+    recommended_actions: NotRequired[List[Any]]
+    entities: NotRequired[dict]
+    final_report: NotRequired[str]
     detection_engine_executed: NotRequired[bool]

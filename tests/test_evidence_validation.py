@@ -3,11 +3,34 @@ from agent.nodes import evidence_validation_node
 def test_evidence_validation_success():
     state = {
         "incident_id": "TEST-01",
-        "triage_verdict": "suspicious",
-        "canonical_events": [{"event_id": "1", "raw_message": "This is a malicious payload string"}],
-        "evidence": [
-            {"event_id": "1", "quote": "malicious payload", "reason": "test", "source": "test"}
-        ]
+        "triage_submission": {
+            "triage_verdict": "suspicious_activity",
+            "incident_type": "other",
+            "severity": "medium",
+            "confidence_score": 0.8,
+            "summary": "test",
+            "selected_evidence_ids": ["E1"],
+            "claims": []
+        },
+        "safe_triage_input": {
+            "incident_id": "TEST-01",
+            "incident_type": "other",
+            "incident_family": "other",
+            "title": "test",
+            "deterministic_severity": "none",
+            "deterministic_confidence": 0.0,
+            "first_seen": "2024-01-01T00:00:00Z",
+            "last_seen": "2024-01-01T00:00:00Z",
+            "primary_entity": "1.1.1.1",
+            "incident_type_hint": "other",
+            "detected_signals": [],
+            "candidate_evidence": [
+                {"evidence_id": "E1", "event_id": "1", "quote": "test", "reason": "test", "source": "test"}
+            ],
+            "limited_context_events": [
+                {"event_id": "1", "event_type": "test", "source_ip": "1.1.1.1", "raw_message": "test", "timestamp": "2024-01-01T00:00:00Z", "parser_name": "test", "source_name": "test"}
+            ]
+        }
     }
     res = evidence_validation_node(state)
     assert len(res["validated_evidence"]) == 1
@@ -18,11 +41,30 @@ def test_evidence_validation_success():
 def test_evidence_validation_mismatch():
     state = {
         "incident_id": "TEST-01",
-        "triage_verdict": "suspicious",
-        "canonical_events": [{"event_id": "1", "raw_message": "This is a benign string"}],
-        "evidence": [
-            {"event_id": "1", "quote": "malicious payload string", "reason": "test", "source": "test"}
-        ]
+        "triage_submission": {
+            "triage_verdict": "suspicious_activity",
+            "incident_type": "other",
+            "severity": "medium",
+            "confidence_score": 0.8,
+            "summary": "test",
+            "selected_evidence_ids": ["E1"],
+            "claims": []
+        },
+        "safe_triage_input": {
+            "incident_id": "TEST-01",
+            "incident_type": "other",
+            "incident_family": "other",
+            "title": "test",
+            "deterministic_severity": "none",
+            "deterministic_confidence": 0.0,
+            "first_seen": "2024-01-01T00:00:00Z",
+            "last_seen": "2024-01-01T00:00:00Z",
+            "primary_entity": "1.1.1.1",
+            "incident_type_hint": "other",
+            "detected_signals": [],
+            "candidate_evidence": [], # E1 doesn't exist
+            "limited_context_events": []
+        }
     }
     res = evidence_validation_node(state)
     assert len(res["validated_evidence"]) == 0
@@ -32,9 +74,30 @@ def test_evidence_validation_mismatch():
 def test_evidence_validation_false_positive_missing_evidence():
     state = {
         "incident_id": "TEST-01",
-        "triage_verdict": "false_positive",
-        "raw_logs": [{"event_id": "1", "raw_message": "This is a benign string"}],
-        "evidence": []
+        "triage_submission": {
+            "triage_verdict": "false_positive",
+            "incident_type": "other",
+            "severity": "none",
+            "confidence_score": 0.8,
+            "summary": "test",
+            "selected_evidence_ids": [],
+            "claims": []
+        },
+        "safe_triage_input": {
+            "incident_id": "TEST-01",
+            "incident_type": "other",
+            "incident_family": "other",
+            "title": "test",
+            "deterministic_severity": "none",
+            "deterministic_confidence": 0.0,
+            "first_seen": "2024-01-01T00:00:00Z",
+            "last_seen": "2024-01-01T00:00:00Z",
+            "primary_entity": "1.1.1.1",
+            "incident_type_hint": "other",
+            "detected_signals": [],
+            "candidate_evidence": [],
+            "limited_context_events": []
+        }
     }
     res = evidence_validation_node(state)
     assert res.get("triage_verdict") == "needs_review"

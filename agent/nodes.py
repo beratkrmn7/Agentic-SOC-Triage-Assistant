@@ -1,15 +1,22 @@
 import json
 import re
 import datetime
-from typing import Literal
+import logging
+from dotenv import load_dotenv
+
+from agent.config import get_settings
+from agent.errors import ConfigurationError
+from agent.triage.runner import TriageRunner
+from agent.triage.groq_provider import GroqTriageProvider
+from agent.triage.cache import InMemoryTriageCache
+from agent.triage.validation import validate_evidence
+from agent.triage.claims import validate_claims
+from agent.triage.enums import ReviewReason
+from agent.triage.reporter import generate_report
 
 
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_groq import ChatGroq
-
-from agent.models import IncidentState, TriageResult
+from agent.models import IncidentState
 from agent.tools import (
-    tools_list, 
     detect_sqli_patterns,
     detect_xss_patterns,
     detect_suspicious_commands,
@@ -21,36 +28,25 @@ from agent.tools import (
     detect_benign_web_traffic,
     detect_normal_admin_login
 )
-from agent.config import get_settings
-from agent.errors import ConfigurationError
-
-from dotenv import load_dotenv
-import logging
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+_triage_cache = InMemoryTriageCache()
+_circuit_breaker = None
 
-_llm_cache = None
-
-def get_triage_llm():
-    global _llm_cache
-    if _llm_cache:
-        return _llm_cache
+def get_triage_runner() -> TriageRunner:
+    global _circuit_breaker
     settings = get_settings()
     if not settings.llm_enabled:
         raise ConfigurationError("LLM is disabled via settings (LLM_ENABLED=false).")
-    if not settings.groq_api_key:
-        raise ConfigurationError("The triage provider is not configured (missing API key).")
-    
-    llm = ChatGroq(
-        model=settings.llm_model, 
-        temperature=0,
-        api_key=settings.groq_api_key,
-        max_retries=2
-    )
-    _llm_cache = llm.bind_tools(tools_list)
-    return _llm_cache
+        
+    from agent.triage.circuit_breaker import CircuitBreaker
+    if not _circuit_breaker:
+        _circuit_breaker = CircuitBreaker()
+        
+    provider = GroqTriageProvider(circuit_breaker=_circuit_breaker)
+    return TriageRunner(provider=provider, cache=_triage_cache)
 
 def automated_detection_node(state: IncidentState) -> dict:
     """
@@ -216,238 +212,131 @@ def entity_extraction_node(state: IncidentState) -> dict:
 
 def triage_node(state: IncidentState) -> dict:
     """
-    Analyzes raw logs. The LLM only has access to search_logs and submit_triage_result.
-    It reads pre-computed automated signals and candidate evidence.
+    Analyzes raw logs. Uses the secure bounded TriageRunner.
     """
-    messages = state.get("messages", [])
-    iter_count = state.get("iteration_count", 0)
+    logger.info(f"--- TRIAGE AGENT: Running secure agentic triage for {state['incident_id']} ---")
     
-    if not messages:
-        logger.info(f"--- TRIAGE AGENT: Starting autonomous investigation for {state['incident_id']} ---")
-        
-        detected_signals = state.get("detected_signals", [])
-        signals_text = json.dumps(detected_signals, indent=2) if detected_signals else "No automated signals detected."
-        
-        candidate_evidence = state.get("candidate_evidence", [])
-        candidate_text = json.dumps(candidate_evidence, indent=2) if candidate_evidence else "No candidate evidence available."
-        
-        system_msg = SystemMessage(content=f"""You are an expert SOC Triage Analyst.
-
-AUTOMATED ANALYSIS SIGNALS:
-{signals_text}
-
-CANDIDATE EVIDENCE:
-{candidate_text}
-
-Your goal:
-1. Review the signals and evidence.
-2. If you need more info, use your log search function.
-3. When ready, use the submit function to conclude the triage.
-
-When submitting:
-- Classify `incident_type` as one of: sql_injection, xss, bruteforce_success, bruteforce_failed, lateral_movement, dns_tunneling, malware_hash, backup_traffic, benign_web_traffic, normal_admin_login, port_scan.
-- If signals say "backup_agent.exe", use `backup_traffic`.
-- Provide `evidence` by copying exact items from the CANDIDATE EVIDENCE.
-- If you lack evidence, set triage_verdict to `needs_review`.
-""")
-        human_msg = HumanMessage(content=f"Please investigate incident: {state['incident_id']}.")
-        messages = [system_msg, human_msg]
+    # Needs the IncidentBundle to pass to runner
+    from agent.models import IncidentBundle
     
-    import time
-    max_retries = 3
-    for attempt in range(max_retries):
+    # We must construct an IncidentBundle dummy or from state to pass to runner.
+    from agent.schema import CanonicalLogEvent
+    bundle_events = []
+    for cd in state.get("canonical_events", []):
         try:
-            llm = get_triage_llm()
-            response = llm.invoke(messages)
-            if not hasattr(response, "tool_calls") or not response.tool_calls:
-                logger.info(f"--- TRIAGE AGENT: Model output plain text (Attempt {attempt+1}/{max_retries}). Forcing tool call... ---")
-                messages.append(response)
-                messages.append(HumanMessage(content="You must use the submit_triage_result tool to provide your final verdict. Do not just write text."))
-                continue
-            break
-        except ConfigurationError as ce:
-            logger.error(f"--- TRIAGE AGENT: Configuration Error -> {ce} ---")
-            from langchain_core.messages import AIMessage
-            response = AIMessage(content="API failed.", tool_calls=[])
-            break
-        except Exception as e:
-            err_str = str(e)
-            logger.debug(f"DEBUG: Exception in invoke! type={type(e)}, str={err_str}")
-            if "tool_use_failed" in err_str or "parse" in err_str.lower():
-                logger.error(f"--- TRIAGE AGENT: Local Parser Error (Attempt {attempt+1}/{max_retries}). Retrying... ---")
-                time.sleep(2)
-            else:
-                logger.error(f"--- TRIAGE AGENT: Ollama Error -> {err_str} ---")
-                if attempt == max_retries - 1:
-                    raise
-                time.sleep(2)
-    else:
-        from langchain_core.messages import AIMessage
-        logger.info("--- TRIAGE AGENT: Max retries exceeded. Forcing fallback. ---")
-        response = AIMessage(content="API failed.", tool_calls=[])
+            bundle_events.append(CanonicalLogEvent(**cd))
+        except Exception:
+            pass
 
-    return {"messages": [response], "iteration_count": iter_count + 1}
+    bundle = IncidentBundle(
+        incident_id=state['incident_id'],
+        incident_type_hint=state.get('incident_type', 'other'),
+        first_seen=None,
+        last_seen=None,
+        source_ips=list(state.get('entities', {}).get('ips', [])),
+        destination_ips=[],
+        destination_ports=[],
+        event_ids=[e.get('event_id', '') for e in state.get('canonical_events', [])],
+        events=bundle_events,
+        context_events=[]
+    )
 
-def route_triage(state: IncidentState) -> Literal["tools", "process_result"]:
-    logger.debug(f"DEBUG route_triage: iteration_count = {state.get('iteration_count', 0)}")
-    if state.get("iteration_count", 0) >= 5:
-        logger.info("--- TRIAGE AGENT: Iteration limit reached. Forcing process_result ---")
-        return "process_result"
+    try:
+        runner = get_triage_runner()
+        result = runner.run(state, bundle)
         
-    last_message = state["messages"][-1]
-    logger.debug(f"DEBUG route_triage: last_message type={type(last_message)}, tool_calls={getattr(last_message, 'tool_calls', None)}")
-    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        has_submit = any(tool_call["name"] == "submit_triage_result" for tool_call in last_message.tool_calls)
-        logger.debug(f"DEBUG route_triage: has_submit={has_submit}")
-        if has_submit:
-            return "process_result"
-        return "tools"
-    
-    logger.debug("DEBUG route_triage: no tool calls found, returning process_result")
-    return "process_result"
-
-def process_result_node(state: IncidentState) -> dict:
-    """
-    Extracts the structured TriageResult from the submit tool call with Pydantic validation.
-    Also handles mixed tool call errors.
-    """
-    last_message = state["messages"][-1]
-    
-    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        # Check for mixed tool call edge case
-        has_submit = any(tool_call["name"] == "submit_triage_result" for tool_call in last_message.tool_calls)
-        if has_submit and len(last_message.tool_calls) > 1:
-            logger.error("--- TRIAGE AGENT: Error - Mixed tool calls detected (Submit + Others). Forcing needs_review ---")
-            return {
-                "triage_verdict": "needs_review", 
+        triage_dict = {
+            "iteration_count": result.metrics.iteration_count,
+            "search_call_count": result.metrics.search_call_count,
+            "tool_call_count": result.metrics.tool_call_count,
+            "triage_metrics": result.metrics.model_dump(),
+            "review_reason": result.review_reason.value,
+        }
+        
+        if result.submission:
+            triage_dict.update({
+                "triage_submission": result.submission.model_dump(),
+                "triage_verdict": result.submission.triage_verdict.value,
+                "incident_type": result.submission.incident_type,
+                "severity": result.submission.severity.value,
+                "confidence_score": result.submission.confidence_score,
+                "evidence": [], # Handled later
+            })
+        else:
+            triage_dict.update({
+                "triage_verdict": "needs_review",
                 "incident_type": "other",
-                "severity": "none", 
-                "confidence_score": 0.0, 
-                "evidence": [],
-                "errors": ["Mixed tool call: submit_triage_result cannot be called alongside other tools."]
-            }
+                "severity": "none",
+                "confidence_score": 0.0,
+                "evidence": []
+            })
             
-        for tool_call in last_message.tool_calls:
-            if tool_call["name"] == "submit_triage_result":
-                try:
-                    validated_args = TriageResult.model_validate(tool_call["args"])
-                    logger.info(f"--- TRIAGE AGENT: Verdict submitted -> {validated_args.triage_verdict} ({validated_args.incident_type}) ---")
-                    
-                    severity = validated_args.severity
-                    if validated_args.triage_verdict in ["false_positive", "needs_review"]:
-                        severity = "none"
-                        
-                    return {
-                        "triage_verdict": validated_args.triage_verdict,
-                        "incident_type": validated_args.incident_type,
-                        "severity": severity,
-                        "confidence_score": validated_args.confidence_score,
-                        "evidence": [ev.model_dump() for ev in validated_args.evidence],
-                    }
-                except Exception as e:
-                    logger.error(f"--- TRIAGE AGENT: Pydantic Validation Error -> {e} ---")
-                    return {
-                        "triage_verdict": "needs_review",
-                        "incident_type": "other",
-                        "severity": "none",
-                        "confidence_score": 0.0,
-                        "evidence": [],
-                        "errors": [f"Validation error: {e}"]
-                    }
-            
-    logger.error("--- TRIAGE AGENT: Error - No verdict submitted properly or max iterations hit! ---")
-    return {
-        "triage_verdict": "needs_review", 
-        "incident_type": "other",
-        "severity": "none", 
-        "confidence_score": 0.0, 
-        "evidence": [],
-        "errors": ["Model failed to submit verdict properly or hit iteration limit."]
-    }
+        return triage_dict
+        
+    except Exception as e:
+        logger.error(f"--- TRIAGE AGENT: Fatal Error -> {e} ---")
+        return {
+            "triage_verdict": "needs_review", 
+            "incident_type": "other",
+            "severity": "none", 
+            "confidence_score": 0.0, 
+            "evidence": [],
+            "review_reason": ReviewReason.PROVIDER_UNAVAILABLE.value,
+            "errors": [str(e)]
+        }
+
+
 
 def evidence_validation_node(state: IncidentState) -> dict:
     """
-    Deterministically validates that the evidence event_ids exist AND the quote is exactly in the raw_message.
-    Enforces evidence length and availability for false_positive as well.
-    Also checks if original_fields match the actual log.
+    Deterministically validates evidence IDs and claims using Phase 4 architecture.
     """
     logger.info(f"--- VALIDATION NODE: Validating evidence for {state['incident_id']} ---")
     
-    evidence_list = state.get("evidence", [])
-    if not evidence_list:
-        if state.get("triage_verdict") in ["suspicious", "confirmed_incident", "false_positive"]:
-            logger.info(f"--- VALIDATION NODE: {state.get('triage_verdict')} verdict given without evidence. Forcing needs_review ---")
-            return {"validated_evidence": [], "rejected_evidence": [], "triage_verdict": "needs_review"}
-        return {"validated_evidence": [], "rejected_evidence": []}
-        
-    canonical_events = state.get("canonical_events", [])
-    log_map = {log.get("event_id"): log for log in canonical_events}
+    from agent.triage.models import TriageSubmission, TriageInput
+    submission_dict = state.get("triage_submission")
+    triage_input_dict = state.get("safe_triage_input")
     
-    validated = []
-    rejected = []
-    
-    for ev in evidence_list:
-        event_id = ev.get("event_id")
-        quote = ev.get("quote", "").strip()
-        
-        if not quote:
-            logger.info(f"--- VALIDATION NODE: Empty quote for {event_id}. ---")
-            rejected.append(ev)
-            continue
-            
-        if event_id in log_map:
-            log_obj = log_map[event_id]
-            raw_msg = log_obj.get("raw_message", "")
-            original_log = log_obj.get("original_log", {})
-            
-            target_str = raw_msg if raw_msg else json.dumps(original_log)
-            
-            # Condition A: Exact quote match (case-insensitive)
-            quote_match = quote.lower() in target_str.lower()
-            
-            # Condition B: Original fields match
-            fields_match = False
-            ev_fields = ev.get("original_fields", {}) if isinstance(ev, dict) else getattr(ev, "original_fields", {})
-            if ev_fields:
-                fields_match = True
-                for k, v in ev_fields.items():
-                    if k not in original_log or str(original_log[k]) != str(v):
-                        fields_match = False
-                        break
-                        
-            if quote_match or fields_match:
-                validated.append(ev)
-            else:
-                logger.info(f"--- VALIDATION NODE: Match failed for {event_id}. ---")
-                ev_copy = dict(ev) if isinstance(ev, dict) else ev.model_dump()
-                ev_copy["validation_error"] = "quote_and_fields_mismatch"
-                rejected.append(ev_copy)
-        else:
-            logger.info(f"--- VALIDATION NODE: Unknown event_id {event_id} ---")
-            ev_copy = dict(ev) if isinstance(ev, dict) else ev.model_dump()
-            ev_copy["validation_error"] = "event_not_found"
-            rejected.append(ev_copy)
-            
-    if rejected:
-        logger.warning(f"--- VALIDATION NODE: Warning! Rejected {len(rejected)} hallucinated or invalid evidence items! ---")
-        
-    verdict = state.get("triage_verdict")
-    if not validated and verdict in ["suspicious", "confirmed_incident", "false_positive"]:
-        logger.info("--- VALIDATION NODE: All evidence rejected. Forcing needs_review ---")
+    if not submission_dict or not triage_input_dict:
         return {
             "validated_evidence": [],
-            "rejected_evidence": rejected,
+            "rejected_evidence": [],
+            "claims": [],
             "triage_verdict": "needs_review",
             "severity": "none",
             "confidence_score": 0.0,
-            "recommended_actions": ["SOC Analyst required: Manual review necessary due to total validation failure."],
-            "review_reason": "All generated evidence failed deterministic validation."
+            "review_reason": ReviewReason.NO_VALIDATED_EVIDENCE.value
         }
         
-    return {
-        "validated_evidence": validated,
-        "rejected_evidence": rejected
+    submission = TriageSubmission(**submission_dict)
+    triage_input = TriageInput(**triage_input_dict)
+    
+    ev_results = validate_evidence(submission, triage_input)
+    accepted_claims, rejected_claims = validate_claims(submission.claims, ev_results)
+    
+    # Check if needs_review fallback applies
+    valid_ev = [e for e in ev_results if e.status == "validated"]
+    verdict = submission.triage_verdict.value
+    
+    from typing import Any
+    ret: dict[str, Any] = {
+        "validated_evidence": [e.model_dump() for e in valid_ev],
+        "rejected_evidence": [e.model_dump() for e in ev_results if e.status == "rejected"],
+        "claims": [c.model_dump() for c in submission.claims],
+        "validated_claims": [c.model_dump() for c in accepted_claims],
+        "rejected_claims": rejected_claims
     }
+    
+    if not valid_ev and verdict in ["suspicious_activity", "confirmed_incident", "false_positive"]:
+        logger.info("--- VALIDATION NODE: All evidence rejected. Forcing needs_review ---")
+        ret.update({
+            "triage_verdict": "needs_review",
+            "severity": "none",
+            "confidence_score": 0.0,
+            "review_reason": ReviewReason.NO_VALIDATED_EVIDENCE.value
+        })
+        
+    return ret
 
 def action_recommendation_node(state: IncidentState) -> dict:
     """
@@ -503,8 +392,7 @@ def action_recommendation_node(state: IncidentState) -> dict:
             
     return {"recommended_actions": actions, "mitre_techniques": mitre_techniques}
 
-def route_after_process(state: IncidentState) -> Literal["evidence_validation_node"]:
-    return "evidence_validation_node"
+
 
 def build_why_it_matters(incident_type: str, verdict: str) -> str:
     if verdict == "needs_review":
@@ -557,53 +445,47 @@ def build_recommended_actions(actions_list: list, max_items: int = 3) -> str:
 
 def reporter_node(state: IncidentState) -> dict:
     """
-    Generates a structured deterministic markdown summary.
+    Generates a structured deterministic markdown summary via the phase 4 reporter.
     """
     logger.info(f"--- REPORTER AGENT: Generating deterministic report for {state['incident_id']} ---")
     
-    verdict = state.get("triage_verdict", "needs_review")
-    incident_type = state.get("incident_type", "other")
-    severity = state.get("severity", "none")
-    confidence = state.get("confidence_score", 0.0)
+    from agent.triage.models import TriageSubmission, EvidenceValidationResult, TriageClaim
     
-    mitre = state.get("mitre_techniques", [])
-    evidence = state.get("validated_evidence", [])
-    actions = state.get("recommended_actions", [])
-    
-    summary_lines = [
-        "## Triage Summary",
-        f"- Verdict: {verdict}",
-        f"- Incident Type: {incident_type}",
-        f"- Severity: {severity}",
-        f"- Confidence: {confidence}",
-        ""
-    ]
-    
-    why_it_matters = [
-        "## Why It Matters",
-        build_why_it_matters(incident_type, verdict),
-        ""
-    ]
-    
-    key_evidence = [
-        "## Key Evidence",
-        build_key_evidence(evidence),
-        ""
-    ]
-    
-    mitre_section = []
-    if mitre and verdict not in ["false_positive", "needs_review"]:
-        mitre_section.append("## MITRE ATT&CK")
-        for tech in mitre:
-            mitre_section.append(f"- {tech}")
-        mitre_section.append("")
+    submission_dict = state.get("triage_submission")
+    if not submission_dict:
+        # Build dummy
+        from agent.triage.enums import TriageVerdict, TriageSeverity
+        submission = TriageSubmission(
+            triage_verdict=TriageVerdict.NEEDS_REVIEW,
+            incident_type="other",
+            severity=TriageSeverity.NONE,
+            confidence_score=0.0,
+            summary="No submission available. " + str(state.get("review_reason", ""))
+        )
+    else:
+        submission = TriageSubmission(**submission_dict)
         
-    rec_actions = [
-        "## Recommended Actions",
-        build_recommended_actions(actions)
-    ]
+    # Override verdict if state changed it (e.g. forced to needs_review by validation)
+    if state.get("triage_verdict") == "needs_review":
+        from agent.triage.enums import TriageVerdict, TriageSeverity
+        submission.triage_verdict = TriageVerdict.NEEDS_REVIEW
+        submission.severity = TriageSeverity.NONE
+        submission.confidence_score = 0.0
+
+    valid_ev = [EvidenceValidationResult(**e) for e in state.get("validated_evidence", [])]
+    rej_ev = [EvidenceValidationResult(**e) for e in state.get("rejected_evidence", [])]
+    claims = [TriageClaim(**c) for c in state.get("validated_claims", [])]
     
-    report_parts = summary_lines + why_it_matters + key_evidence + mitre_section + rec_actions
-    final_report = "\n".join(report_parts).strip()
+    metadata = {
+        "title": f"Incident {state['incident_id']} ({state.get('incident_type', 'unknown')})"
+    }
     
-    return {"final_report": final_report}
+    report = generate_report(
+        submission=submission,
+        validated_evidence=valid_ev + rej_ev,
+        accepted_claims=claims,
+        incident_metadata=metadata,
+        review_reason=state.get("review_reason", "none")
+    )
+    
+    return {"final_report": report}

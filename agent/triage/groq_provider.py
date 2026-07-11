@@ -1,0 +1,163 @@
+from typing import Any, List, Optional
+from agent.triage.provider import TriageProvider, TriageProviderRequest, TriageProviderResponse
+from agent.triage.models import TriageSubmission
+from agent.triage.exceptions import (
+    TriageProviderError,
+    ProviderConfigurationError,
+    ProviderUnavailableError,
+    ProviderTimeoutError,
+    ProviderRateLimitError,
+    ProviderAuthenticationError,
+    ProviderInvalidResponseError
+)
+from agent.triage.retry import with_retry
+from agent.triage.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
+from agent.triage.tools import SearchLogsTool
+from agent.triage.enums import ReviewReason
+from agent.config import get_settings
+
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_groq import ChatGroq
+import groq
+
+class GroqTriageProvider(TriageProvider):
+    def __init__(self, model_name: str = "llama3-70b-8192", circuit_breaker: Optional['CircuitBreaker'] = None):
+        self.settings = get_settings()
+        self.circuit_breaker = circuit_breaker or CircuitBreaker()
+        
+        if not self.settings.llm_enabled:
+            raise ProviderConfigurationError("LLM is disabled")
+        if not self.settings.groq_api_key:
+            raise ProviderConfigurationError("GROQ_API_KEY is missing")
+            
+        self.llm = ChatGroq(
+            model=self.settings.llm_model,
+            temperature=0,
+            api_key=self.settings.groq_api_key,
+            max_retries=0 # Handled by our own retry
+        )
+        
+    def _invoke_with_circuit_breaker(self, messages: List[Any], tools: List[Any]) -> Any:
+        self.circuit_breaker.check()
+        
+        def _call():
+            try:
+                llm_with_tools = self.llm.bind_tools(tools)
+                return llm_with_tools.invoke(messages)
+            except groq.RateLimitError as e:
+                raise ProviderRateLimitError(str(e))
+            except groq.APITimeoutError as e:
+                raise ProviderTimeoutError(str(e))
+            except groq.AuthenticationError as e:
+                # Auth error should not be retried and breaks immediately
+                self.circuit_breaker.record_failure()
+                raise ProviderAuthenticationError(str(e))
+            except groq.APIError as e:
+                raise ProviderUnavailableError(str(e))
+                
+        try:
+            res = with_retry(_call, max_retries=2, base_delay=1.0)
+            self.circuit_breaker.record_success()
+            return res
+        except Exception as e:
+            self.circuit_breaker.record_failure()
+            raise e
+
+    def invoke(self, request: TriageProviderRequest) -> TriageProviderResponse:
+        messages = [
+            SystemMessage(content=request.system_prompt),
+            HumanMessage(content=f"Please analyze the following triage input:\n\n{request.triage_input.model_dump_json(indent=2)}")
+        ]
+        
+        triage_input = request.context.get("triage_input")
+        if not triage_input:
+            raise ProviderConfigurationError("TriageInput context missing")
+            
+        search_tool = SearchLogsTool(
+            incident_events=triage_input.limited_context_events,
+            max_calls=3,
+            max_query_chars=100,
+            max_results=10
+        )
+        
+        # Tools definitions for Langchain
+        from langchain_core.tools import tool
+        
+        @tool
+        def search_logs(query: str) -> str:
+            """Searches the incident scope logs for the given substring query."""
+            res = search_tool(query)
+            return res.model_dump_json(include={"query", "matched_event_ids", "truncated", "results"})
+            
+        @tool
+        def submit_triage_result(
+            triage_verdict: str,
+            incident_type: str,
+            severity: str,
+            confidence_score: float,
+            summary: str,
+            selected_evidence_ids: List[str],
+            claims: List[dict]
+        ) -> str:
+            """Submit the final triage verdict."""
+            return "SUBMITTED"
+            
+        tools = [search_logs, submit_triage_result]
+        
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        
+        for iteration in range(5): # MAX_AGENT_ITERATIONS
+            try:
+                ai_message = self._invoke_with_circuit_breaker(messages, tools)
+            except CircuitBreakerOpenError as e:
+                raise e
+            except Exception as e:
+                # Wrap any unknown
+                raise ProviderUnavailableError(str(e))
+                
+            if hasattr(ai_message, "response_metadata") and "token_usage" in ai_message.response_metadata:
+                usage = ai_message.response_metadata["token_usage"]
+                total_prompt_tokens += usage.get("prompt_tokens", 0)
+                total_completion_tokens += usage.get("completion_tokens", 0)
+                
+            messages.append(ai_message)
+            
+            if not ai_message.tool_calls:
+                # Force tool call or fail
+                if iteration == 4:
+                    raise ProviderInvalidResponseError("Max iterations reached without submission")
+                messages.append(HumanMessage(content="You must use the submit_triage_result tool to provide your final verdict."))
+                continue
+                
+            # Check for mixed tool calls
+            has_submit = any(tc["name"] == "submit_triage_result" for tc in ai_message.tool_calls)
+            if has_submit and len(ai_message.tool_calls) > 1:
+                raise TriageProviderError("Mixed tool calls", ReviewReason.MIXED_TOOL_CALLS)
+                
+            for tool_call in ai_message.tool_calls:
+                if tool_call["name"] == "submit_triage_result":
+                    try:
+                        submission = TriageSubmission.model_validate(tool_call["args"])
+                        return TriageProviderResponse(
+                            submission=submission,
+                            prompt_tokens=total_prompt_tokens,
+                            completion_tokens=total_completion_tokens
+                        )
+                    except Exception as e:
+                        if iteration == 4:
+                            raise ProviderInvalidResponseError(f"Validation error: {e}")
+                        messages.append(ToolMessage(tool_call_id=tool_call["id"], content=f"Schema Error: {str(e)}", name="submit_triage_result"))
+                        
+                elif tool_call["name"] == "search_logs":
+                    try:
+                        result_str = search_logs.invoke(tool_call["args"])
+                        messages.append(ToolMessage(tool_call_id=tool_call["id"], content=result_str, name="search_logs"))
+                    except Exception as e:
+                        if "maximum_search_calls_reached" in str(e):
+                            raise TriageProviderError("Max search calls reached", ReviewReason.MAXIMUM_SEARCH_CALLS_REACHED)
+                        messages.append(ToolMessage(tool_call_id=tool_call["id"], content=f"Error: {e}", name="search_logs"))
+                else:
+                    raise TriageProviderError("Invalid tool call", ReviewReason.INVALID_TOOL_CALL)
+
+        raise TriageProviderError("Max iterations reached", ReviewReason.MAXIMUM_ITERATIONS_REACHED)
