@@ -81,14 +81,18 @@ class PfFirewallParser(BaseLogParser):
         fqdns = []
         if raw_record.get("sourceFqdns"):
             v = raw_record["sourceFqdns"]
-            if isinstance(v, list): fqdns.extend(v)
-            else: fqdns.append(v)
+            if isinstance(v, list):
+                fqdns.extend(v)
+            else:
+                fqdns.append(v)
             
         dfqdns = []
         if raw_record.get("destinationFqdns"):
             v = raw_record["destinationFqdns"]
-            if isinstance(v, list): dfqdns.extend(v)
-            else: dfqdns.append(v)
+            if isinstance(v, list):
+                dfqdns.extend(v)
+            else:
+                dfqdns.append(v)
             
         return CanonicalLogEvent(
             event_id=event_id,
