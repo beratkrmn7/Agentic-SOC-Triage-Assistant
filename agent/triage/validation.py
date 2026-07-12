@@ -19,7 +19,10 @@ def validate_evidence(
     valid_candidate_ids = {c.evidence_id: c for c in triage_input.candidate_evidence}
     trusted_events = context.events + context.context_events
     trusted_event_map = {e.event_id: e for e in trusted_events}
-    detection_evidence_map = {ev.event_id: ev for ev in context.incident.evidence}
+    from collections import defaultdict
+    detection_evidence_map = defaultdict(list)
+    for ev in context.incident.evidence:
+        detection_evidence_map[ev.event_id].append(ev)
     
     seen_ids = set()
     
@@ -123,8 +126,8 @@ def validate_evidence(
         # Validate source/provenance
         if candidate.source:
             if candidate.event_id in detection_evidence_map:
-                original_evidence = detection_evidence_map[candidate.event_id]
-                if candidate.source != original_evidence.source:
+                original_evidences = detection_evidence_map[candidate.event_id]
+                if not any(candidate.source == original_ev.source for original_ev in original_evidences):
                     results.append(EvidenceValidationResult(
                         evidence_id=ev_id,
                         event_id=candidate.event_id,
@@ -147,11 +150,13 @@ def validate_evidence(
         if candidate.correlation_context:
             target_entities = triage_input.target_entities
             mismatch = False
+            allowlisted_fields = {"source_entity", "target_entity", "src_ip", "dst_ip", "user", "hostname"}
             for k, v in candidate.correlation_context.items():
-                if v not in target_entities and v != triage_input.primary_entity:
-                    # If correlation context refers to an entity not in this incident
-                    mismatch = True
-                    break
+                if k in allowlisted_fields:
+                    if v not in target_entities and v != triage_input.primary_entity:
+                        # If correlation context refers to an entity not in this incident
+                        mismatch = True
+                        break
             if mismatch:
                 results.append(EvidenceValidationResult(
                     evidence_id=ev_id,

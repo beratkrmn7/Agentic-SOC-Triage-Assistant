@@ -44,10 +44,18 @@ class GroqTriageProvider(TriageProvider):
         
         def _call():
             try:
-                llm_with_tools = self.llm.bind_tools(tools)
+                if timeout is not None and not getattr(self, "_custom_llm_injected", False) and isinstance(self.llm, ChatGroq):
+                    temp_llm = ChatGroq(
+                        model=self.settings.llm_model,
+                        temperature=0,
+                        api_key=self.settings.groq_api_key,
+                        max_retries=0,
+                        timeout=max(0.1, timeout)
+                    )
+                    llm_with_tools = temp_llm.bind_tools(tools)
+                else:
+                    llm_with_tools = self.llm.bind_tools(tools)
                 kwargs: Any = {}
-                if timeout is not None:
-                    kwargs["timeout"] = max(0.1, timeout)
                 return llm_with_tools.invoke(messages, **kwargs)
             except groq.RateLimitError as e:
                 raise ProviderRateLimitError(str(e))
@@ -61,14 +69,14 @@ class GroqTriageProvider(TriageProvider):
                 raise ProviderUnavailableError(str(e))
                 
         try:
-            res = with_retry(
+            res, retries = with_retry(
                 _call, 
                 max_retries=self.settings.llm_max_retries, 
                 base_delay=self.settings.llm_retry_base_seconds,
                 max_delay=self.settings.llm_retry_max_seconds
             )
             self.circuit_breaker.record_success()
-            return res
+            return res, retries
         except (ProviderTimeoutError, ProviderRateLimitError, ProviderAuthenticationError, ProviderUnavailableError) as e:
             self.circuit_breaker.record_failure()
             raise e
@@ -120,6 +128,7 @@ class GroqTriageProvider(TriageProvider):
         total_prompt_tokens = 0
         total_completion_tokens = 0
         tool_call_count = 0
+        total_retry_count = 0
         
         for iteration in range(self.settings.max_agent_iterations):
             try:
@@ -129,7 +138,8 @@ class GroqTriageProvider(TriageProvider):
                     timeout = request.deadline - time.monotonic()
                     if timeout <= 0:
                         raise ProviderTimeoutError("Deadline exceeded before provider call")
-                ai_message = self._invoke_with_circuit_breaker(messages, tools, timeout=timeout)
+                ai_message, attempt_count = self._invoke_with_circuit_breaker(messages, tools, timeout=timeout)
+                total_retry_count += attempt_count
             except (CircuitBreakerOpenError, ProviderTimeoutError, ProviderRateLimitError, ProviderAuthenticationError, ProviderConfigurationError) as e:
                 raise e
             except Exception as e:
@@ -166,12 +176,13 @@ class GroqTriageProvider(TriageProvider):
                             completion_tokens=total_completion_tokens,
                             iteration_count=iteration + 1,
                             search_call_count=search_tool.calls,
-                            tool_call_count=tool_call_count
+                            tool_call_count=tool_call_count,
+                            retry_count=total_retry_count
                         )
                     except Exception as e:
                         if iteration == self.settings.max_agent_iterations - 1:
                             raise ProviderInvalidResponseError(f"Validation error: {e}")
-                        messages.append(ToolMessage(tool_call_id=tool_call["id"], content=f"Schema Error: {str(e)}", name="submit_triage_result"))
+                        messages.append(ToolMessage(tool_call_id=tool_call["id"], content="invalid_submission_schema", name="submit_triage_result"))
                         
                 elif tool_call["name"] == "search_logs":
                     try:
@@ -179,8 +190,8 @@ class GroqTriageProvider(TriageProvider):
                         messages.append(ToolMessage(tool_call_id=tool_call["id"], content=result_str, name="search_logs"))
                     except ProviderMaxSearchCallsError as e:
                         raise e
-                    except Exception as e:
-                        messages.append(ToolMessage(tool_call_id=tool_call["id"], content=f"Error: {e}", name="search_logs"))
+                    except Exception:
+                        messages.append(ToolMessage(tool_call_id=tool_call["id"], content="tool_execution_failed", name="search_logs"))
                 else:
                     raise TriageProviderError("Invalid tool call", ReviewReason.INVALID_TOOL_CALL)
 

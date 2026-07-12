@@ -58,10 +58,10 @@ class TriageRunner:
         # Initialize Metrics
         metrics = TriageMetrics(
             incident_id=context.incident.incident_id,
-            provider="groq",
+            provider=self.settings.llm_provider,
             model=self.settings.llm_model,
             prompt_version=TRIAGE_PROMPT_VERSION,
-            schema_version="1.0",
+            schema_version=self.settings.triage_schema_version,
             started_at=time.time().__str__(),
             completed_at=""
         )
@@ -117,6 +117,12 @@ class TriageRunner:
             metrics.iteration_count = getattr(response, 'iteration_count', 1)
             metrics.search_call_count = getattr(response, 'search_call_count', 0)
             metrics.tool_call_count = getattr(response, 'tool_call_count', 0)
+            metrics.retry_count = getattr(response, 'retry_count', 0)
+            metrics.provider_latency_ms = (time.monotonic() - start_time) * 1000.0
+            metrics.estimated_prompt_tokens = approx_tokens
+            metrics.estimated_cost = None
+            if hasattr(self.provider, 'circuit_breaker'):
+                metrics.circuit_breaker_state = self.provider.circuit_breaker.state
             
             # Re-check deadline after invocation
             if time.monotonic() - start_time > timeout_seconds:
@@ -158,7 +164,6 @@ class TriageRunner:
                     metrics=metrics
                 )
         except Exception as e:
-            print(f"TriageRunner Exception: {type(e)} - {str(e)}")
             metrics.fallback_used = True
             
             # Check for global triage timeout

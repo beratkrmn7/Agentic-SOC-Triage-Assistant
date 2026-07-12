@@ -302,10 +302,18 @@ async def analyze_file(file: UploadFile = File(...)):
             
             for sig in sig_list:
                 detected_signals.append({
-                    "detector_name": sig.rule_name,
-                    "status": "alert",
-                    "message": f"{sig.rule_name} detected targeting {len(sig.target_entities)} entities. Severity: {sig.severity}",
-                    "matched_event_ids": sig.event_ids
+                    "signal_id": getattr(sig, "signal_id", ""),
+                    "rule_id": getattr(sig, "rule_id", ""),
+                    "rule_name": getattr(sig, "rule_name", ""),
+                    "signal_type": getattr(sig, "signal_type", ""),
+                    "signal_family": getattr(sig, "signal_family", ""),
+                    "severity": getattr(sig, "severity", "none"),
+                    "confidence_score": getattr(sig, "confidence", 0.0),
+                    "event_ids": getattr(sig, "event_ids", []),
+                    "target_entities": getattr(sig, "target_entities", []),
+                    "metrics": getattr(sig, "metrics", {}),
+                    "mitre_techniques": getattr(sig, "mitre_techniques", []),
+                    "description": getattr(sig, "rule_name", "")
                 })
             
             # Merge evidence from the new incident bundle

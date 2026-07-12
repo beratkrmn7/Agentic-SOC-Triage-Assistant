@@ -200,3 +200,70 @@ def test_validate_claims():
     assert len(rejected) == 1
     assert rejected[0]["claim_id"] == "cl_2"
     assert rejected[0]["reason"] == RejectionReason.EVIDENCE_REJECTED.value
+
+def test_provenance_multiple_evidence_same_event():
+    from agent.schema import CanonicalLogEvent
+    from agent.detection.models import IncidentBundle, DetectionEvidence
+    from agent.triage.models import TriageIncidentContext
+    from datetime import datetime, timezone
+    
+    trusted_events = [CanonicalLogEvent(event_id="EVT-1", timestamp=None, observed_at=datetime.now(timezone.utc), parse_status="success", parser_name="test_parser", source_name="test_source", raw_message="An error occurred here", original_log={})]
+    
+    # 2 pieces of evidence for the same event
+    ev1 = DetectionEvidence(event_id="EVT-1", quote="error", reason="test", source="rule_1", original_fields={}, correlation_context={})
+    ev2 = DetectionEvidence(event_id="EVT-1", quote="occurred", reason="test2", source="rule_2", original_fields={}, correlation_context={})
+    
+    bundle = IncidentBundle(incident_id="INC-1", incident_type="test", incident_family="test", title="test", severity="low", confidence=1.0, primary_entity="ip", target_entities=[], signal_ids=[], evidence=[ev1, ev2], metrics={}, mitre_techniques=[], merge_key="mock", event_ids=[], context_event_ids=[], first_seen=datetime.now(timezone.utc), last_seen=datetime.now(timezone.utc))
+    context = TriageIncidentContext(incident=bundle, events=trusted_events)
+    
+    triage_input = TriageInput(
+        incident_id="INC-1", incident_type="test", incident_family="test", title="test",
+        deterministic_severity="high", deterministic_confidence=1.0, first_seen="2024", last_seen="2024", primary_entity="ip",
+        candidate_evidence=[
+            EvidenceCandidate(evidence_id="ev_1", event_id="EVT-1", quote="error", reason="test", source="rule_1", canonical_fields={}, vendor_original_fields={}),
+            EvidenceCandidate(evidence_id="ev_2", event_id="EVT-1", quote="occurred", reason="test2", source="rule_2", canonical_fields={}, vendor_original_fields={})
+        ]
+    )
+    
+    submission = TriageSubmission(
+        triage_verdict=TriageVerdict.CONFIRMED_INCIDENT, incident_type="test", severity=TriageSeverity.HIGH,
+        confidence_score=0.9, summary="Test", selected_evidence_ids=["ev_1", "ev_2"], claims=[]
+    )
+    
+    results = validate_evidence(submission, triage_input, context)
+    assert len(results) == 2
+    assert all(r.status == "validated" for r in results)
+
+def test_correlation_context_allowlist():
+    from agent.schema import CanonicalLogEvent
+    from agent.detection.models import IncidentBundle
+    from agent.triage.models import TriageIncidentContext
+    from datetime import datetime, timezone
+    
+    trusted_events = [CanonicalLogEvent(event_id="EVT-1", timestamp=None, observed_at=datetime.now(timezone.utc), parse_status="success", parser_name="test_parser", source_name="test_source", raw_message="An error occurred here", original_log={})]
+    bundle = IncidentBundle(incident_id="INC-1", incident_type="test", incident_family="test", title="test", severity="low", confidence=1.0, primary_entity="1.1.1.1", target_entities=["2.2.2.2"], signal_ids=[], evidence=[], metrics={}, mitre_techniques=[], merge_key="mock", event_ids=[], context_event_ids=[], first_seen=datetime.now(timezone.utc), last_seen=datetime.now(timezone.utc))
+    context = TriageIncidentContext(incident=bundle, events=trusted_events)
+    
+    triage_input = TriageInput(
+        incident_id="INC-1", incident_type="test", incident_family="test", title="test",
+        deterministic_severity="high", deterministic_confidence=1.0, first_seen="2024", last_seen="2024", primary_entity="1.1.1.1", target_entities=["2.2.2.2"],
+        candidate_evidence=[
+            EvidenceCandidate(
+                evidence_id="ev_1", event_id="EVT-1", quote="error", reason="test", source="test_parser", canonical_fields={}, vendor_original_fields={},
+                correlation_context={
+                    "target_entity": "2.2.2.2", 
+                    "destination_port": 443, 
+                    "protocol": "tcp"
+                }
+            )
+        ]
+    )
+    
+    submission = TriageSubmission(
+        triage_verdict=TriageVerdict.CONFIRMED_INCIDENT, incident_type="test", severity=TriageSeverity.HIGH,
+        confidence_score=0.9, summary="Test", selected_evidence_ids=["ev_1"], claims=[]
+    )
+    
+    results = validate_evidence(submission, triage_input, context)
+    assert len(results) == 1
+    assert results[0].status == "validated"

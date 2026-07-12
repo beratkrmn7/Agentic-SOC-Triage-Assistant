@@ -12,7 +12,7 @@ def with_retry(
     attempt = 0
     while True:
         try:
-            return func()
+            return func(), attempt
         except (ProviderRateLimitError, ProviderTimeoutError, ProviderUnavailableError) as e:
             attempt += 1
             if attempt > max_retries:

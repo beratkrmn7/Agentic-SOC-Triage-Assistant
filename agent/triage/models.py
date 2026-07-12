@@ -106,6 +106,7 @@ class TriageMetrics(BaseModel):
     iteration_count: int = 0
     search_call_count: int = 0
     tool_call_count: int = 0
+    retry_count: int = 0
     started_at: str
     completed_at: str
     latency_ms: float = 0.0

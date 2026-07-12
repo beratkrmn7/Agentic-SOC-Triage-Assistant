@@ -55,7 +55,7 @@ def build_triage_input(
     
     signal_summaries = []
     for sig in detected_signals:
-        signal_summaries.append(f"[{sig.get('detector_name', 'unknown')}] {sig.get('description', '')} - Severity: {sig.get('severity', 'none')} Confidence: {sig.get('confidence_score', 0.0)}")
+        signal_summaries.append(f"[{sig.get('rule_name', 'unknown')}] {sig.get('description', '')} - Severity: {sig.get('severity', 'none')} Confidence: {sig.get('confidence_score', 0.0)}")
     signal_summaries.sort()
     
     ev_candidates = []
