@@ -12,7 +12,6 @@ from agent.config import get_settings
 from agent.errors import InputTooLargeError, UnsupportedInputFormatError, InvalidEncodingError
 from agent.graph import app as agent_app
 from agent.ingestion.pipeline import IngestionPipeline
-from agent.filtering import EventFilter
 from agent.models import IncidentState
 
 app = FastAPI(
@@ -200,65 +199,63 @@ async def detect_file(file: UploadFile = File(...)):
     Analyze a raw JSONL log file, performing full ingestion, filtering, and Phase 3 DetectionEngine logic.
     Returns signals and incidents without invoking the LLM triage graph.
     """
-    from agent.detection.engine import DetectionEngine
+    from agent.application.analysis_service import AnalysisService
     temp_path = await secure_save_upload(file)
         
     try:
-        ingest = IngestionPipeline()
-        filter_engine = EventFilter()
-        detection_engine = DetectionEngine()
-        
-        ingest_result = ingest.ingest_file(temp_path)
-        filter_result = filter_engine.filter_events(ingest_result.events)
-        
-        det_result = detection_engine.analyze(filter_result.candidates, filter_result.context)
+        svc = AnalysisService()
+        result = svc.analyze_file(temp_path, run_triage=False, source_name="api_detect")
+        det_result = result.detection_result
+        ingest_result = result.ingestion_result
         
         # Sanitize output for public endpoint
         safe_incidents = []
-        for i in det_result.incidents:
-            safe_incidents.append({
-                "incident_id": i.incident_id,
-                "incident_type": i.incident_type,
-                "severity": i.severity,
-                "confidence": i.confidence,
-                "first_seen": i.first_seen.isoformat() if i.first_seen else None,
-                "last_seen": i.last_seen.isoformat() if i.last_seen else None,
-                "event_count": len(i.event_ids),
-                "signal_count": len(i.signal_ids),
-                "target_count": len(i.target_entities)
-            })
-            
+        if det_result:
+            for i in det_result.incidents:
+                safe_incidents.append({
+                    "incident_id": i.incident_id,
+                    "incident_type": i.incident_type,
+                    "severity": i.severity,
+                    "confidence": i.confidence,
+                    "first_seen": i.first_seen.isoformat() if i.first_seen else None,
+                    "last_seen": i.last_seen.isoformat() if i.last_seen else None,
+                    "event_count": len(i.event_ids),
+                    "signal_count": len(i.signal_ids),
+                    "target_count": len(i.target_entities)
+                })
+                
         safe_signals = []
-        for s in det_result.signals:
-            safe_signals.append({
-                "signal_id": s.signal_id,
-                "rule_name": s.rule_name,
-                "severity": s.severity,
-                "confidence": s.confidence,
-                "event_count": len(s.event_ids),
-                "target_count": len(s.target_entities)
-            })
-            
+        if det_result:
+            for s in det_result.signals:
+                safe_signals.append({
+                    "signal_id": s.signal_id,
+                    "rule_name": s.rule_name,
+                    "severity": s.severity,
+                    "confidence": s.confidence,
+                    "event_count": len(s.event_ids),
+                    "target_count": len(s.target_entities)
+                })
+                
         return {
             "ingestion": {
-                "total_records": ingest_result.metrics.total_records,
-                "parsed_records": ingest_result.metrics.parsed_records,
-                "failed_records": ingest_result.metrics.failed_records,
-                "unsupported_records": ingest_result.metrics.unsupported_records
+                "total_records": ingest_result.metrics.total_records if ingest_result else 0,
+                "parsed_records": ingest_result.metrics.parsed_records if ingest_result else 0,
+                "failed_records": ingest_result.metrics.failed_records if ingest_result else 0,
+                "unsupported_records": ingest_result.metrics.unsupported_records if ingest_result else 0
             },
             "detection": {
-                "eligible_events": det_result.metrics.eligible_events,
-                "skipped_events": det_result.metrics.skipped_events,
-                "duplicate_events": getattr(det_result.metrics, 'duplicate_event_count', 0),
-                "signal_count": det_result.metrics.signal_count,
-                "suppressed_signal_count": det_result.metrics.suppressed_signal_count,
-                "incident_count": det_result.metrics.incident_count,
-                "merge_count": getattr(det_result.metrics, 'merge_count', 0),
-                "duration_ms": det_result.metrics.duration_ms
+                "eligible_events": det_result.metrics.eligible_events if det_result else 0,
+                "skipped_events": det_result.metrics.skipped_events if det_result else 0,
+                "duplicate_events": getattr(det_result.metrics, 'duplicate_event_count', 0) if det_result else 0,
+                "signal_count": det_result.metrics.signal_count if det_result else 0,
+                "suppressed_signal_count": det_result.metrics.suppressed_signal_count if det_result else 0,
+                "incident_count": det_result.metrics.incident_count if det_result else 0,
+                "merge_count": getattr(det_result.metrics, 'merge_count', 0) if det_result else 0,
+                "duration_ms": det_result.metrics.duration_ms if det_result else 0
             },
             "incidents": safe_incidents,
             "signals_summary": safe_signals,
-            "warnings": det_result.warnings
+            "warnings": det_result.warnings if det_result else []
         }
     except Exception as e:
         import logging
@@ -273,99 +270,31 @@ async def analyze_file(file: UploadFile = File(...)):
     """
     Analyze a raw JSONL log file, performing full ingestion, filtering, correlation, and LLM triage.
     """
-    from agent.detection.engine import DetectionEngine
+    from agent.application.analysis_service import AnalysisService
     temp_path = await secure_save_upload(file)
         
     try:
-        ingest = IngestionPipeline()
-        filter_engine = EventFilter()
-        detection_engine = DetectionEngine()
-        
-        ingest_result = ingest.ingest_file(temp_path)
-        filter_result = filter_engine.filter_events(ingest_result.events)
-        
-        # Phase 3 Engine directly
-        det_result = detection_engine.analyze(filter_result.candidates, filter_result.context)
-        
-        # Build event map to resolve full CanonicalLogEvent dictionaries for Graph
-        event_map = {e.event_id: e.model_dump(mode="json") for e in ingest_result.events if e.event_id}
+        svc = AnalysisService()
+        result = svc.analyze_file(temp_path, run_triage=True, source_name="api_analyze")
         
         incident_summaries = []
-        for inc in det_result.incidents:
-            canonical_events = [event_map[eid] for eid in inc.event_ids if eid in event_map]
-            
-            detected_signals = []
-            candidate_evidence = []
-            
-            # Resolve the signals that formed this incident
-            sig_list = [s for s in det_result.signals if s.signal_id in inc.signal_ids]
-            
-            for sig in sig_list:
-                detected_signals.append({
-                    "signal_id": getattr(sig, "signal_id", ""),
-                    "rule_id": getattr(sig, "rule_id", ""),
-                    "rule_name": getattr(sig, "rule_name", ""),
-                    "signal_type": getattr(sig, "signal_type", ""),
-                    "signal_family": getattr(sig, "signal_family", ""),
-                    "severity": getattr(sig, "severity", "none"),
-                    "confidence_score": getattr(sig, "confidence", 0.0),
-                    "event_ids": getattr(sig, "event_ids", []),
-                    "target_entities": getattr(sig, "target_entities", []),
-                    "metrics": getattr(sig, "metrics", {}),
-                    "mitre_techniques": getattr(sig, "mitre_techniques", []),
-                    "description": getattr(sig, "rule_name", "")
-                })
-            
-            # Merge evidence from the new incident bundle
-            for ev in inc.evidence:
-                candidate_evidence.append({
-                    "event_id": ev.event_id,
-                    "quote": ev.quote,
-                    "reason": ev.reason,
-                    "source": ev.source,
-                    "original_fields": ev.original_fields,
-                    "correlation_context": ev.correlation_context
-                })
-            context_events = [event_map[eid] for eid in inc.context_event_ids if eid in event_map]
-            
-            from agent.triage.models import TriageIncidentContext
-            from agent.schema import CanonicalLogEvent
-            context = TriageIncidentContext(
-                incident=inc,
-                events=[CanonicalLogEvent(**e) for e in canonical_events],
-                context_events=[CanonicalLogEvent(**e) for e in context_events]
-            )
-
-            initial_state: IncidentState = {
-                "incident_id": inc.incident_id,
-                "incident": context.model_dump(mode="json"),
-                "canonical_events": canonical_events,
-                "messages": [],
-                "iteration_count": 0,
-                "mitre_techniques": [],
-                "candidate_evidence": candidate_evidence,
-                "detected_signals": detected_signals,
-                "search_history": [],
-                "tool_results": [],
-                "errors": []
-            }
-            
-            final_state = agent_app.invoke(initial_state)
-            incident_store[inc.incident_id] = final_state
+        for inc_state in result.incidents:
+            incident_id = inc_state.get('incident_id')
+            incident_store[incident_id] = inc_state
             
             incident_summaries.append({
-                "incident_id": inc.incident_id,
-                "triage_verdict": final_state.get('triage_verdict'),
-                "incident_type": final_state.get('incident_type'),
-                "severity": final_state.get('severity'),
-                "confidence_score": final_state.get('confidence_score'),
-                "mitre_techniques": final_state.get('mitre_techniques', []),
-                "report_status": "Generated" if final_state.get('final_report') else "Not Generated"
+                "incident_id": incident_id,
+                "triage_verdict": inc_state.get('triage_verdict'),
+                "incident_type": inc_state.get('incident_type'),
+                "severity": inc_state.get('severity'),
+                "confidence_score": inc_state.get('confidence_score'),
+                "mitre_techniques": inc_state.get('mitre_techniques', []),
+                "report_status": "Generated" if inc_state.get('final_report') else "Not Generated"
             })
             
         return {
-            "ingestion_metrics": ingest_result.metrics.model_dump(),
-            "filtered_events": len(filter_result.candidates),
+            "ingestion_metrics": result.ingestion_result.metrics.model_dump() if result.ingestion_result else {},
+            "filtered_events": len(result.event_map),
             "incidents_generated": len(incident_summaries),
             "incidents": incident_summaries
         }
