@@ -13,12 +13,15 @@ from agent.errors import InputTooLargeError, UnsupportedInputFormatError, Invali
 from agent.graph import app as agent_app
 from agent.ingestion.pipeline import IngestionPipeline
 from agent.models import IncidentState
+from agent.api.v1.incidents import router as v1_incidents_router
 
 app = FastAPI(
     title="Agentic SOC Triage Assistant",
     description="Agentic SOC Triage workflow using LangGraph and Groq",
     version="1.0.0"
 )
+
+app.include_router(v1_incidents_router, prefix="/api/v1")
 
 app.add_middleware(
     CORSMiddleware,
