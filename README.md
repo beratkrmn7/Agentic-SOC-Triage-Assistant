@@ -1,6 +1,14 @@
-# Agentic SOC Triage Assistant - Phase 2 (Log Ingestion & Parsing Platform)
+# Agentic SOC Triage Assistant - Phase 4 (Secure Agentic Triage - IN PROGRESS)
 
 The system operates strictly as a **Triage Assistant**. It does not perform autonomous remediation (e.g., blocking IPs) or replace SIEM correlation rules. Its purpose is to contextualize alerts and accelerate analyst decision-making.
+
+### Phase 4: Secure Agentic Triage
+The system operates securely as an advisory tool, heavily constraining LLM behavior:
+- **Deterministic Schemas**: All inputs and outputs must pass strict Pydantic validation boundaries.
+- **Evidence Verification**: Deterministically validates that evidence cited by the LLM exactly matches the original raw logs to prevent hallucinations.
+- **Claim Verification**: Validates that all assertions and claims made by the LLM are backed by verified evidence.
+- **Resilience and Stability**: Integrates an idempotent retry layer, circuit breakers, and defensive programming against API failures and token limits.
+- **Secure Tools**: Replaced legacy unbound loops with bounded search_logs execution.
 
 ### Phase 2: Professional Log Ingestion Platform
 The ingestion layer has been upgraded to a modular, robust, and extensible platform capable of handling diverse log formats reliably:
@@ -61,6 +69,20 @@ The final output is a concise SOC triage report focused on four questions:
 - Universal `CanonicalLogEvent` Mapping
 - Extensible Parser Registry (`agent/parsers/registry.py`)
 - Standardized API Error Handling (HTTP 413, 415, 422)
+
+### 3. Detection Engine (Phase 3) - **COMPLETED**
+- Deterministic detection rules for multiple incident types
+- Automated evidence gathering and mitigation recommendation
+- Robust deduplication and alert suppression
+- Safe event context mapping
+
+### 4. Secure Agentic Triage (Phase 4) - **IN PROGRESS**
+- Abstracted Triage Provider interface for LLMs
+- Circuit Breaker pattern to handle repeated provider failures
+- Idempotent execution with max iteration limits
+- Strong bounds on LLM tool usage (`SearchLogsTool`)
+- Rigorous evidence and claim validation
+- Deterministic markdown generation reporting
 
 ## Why This Is Not Just an LLM Chatbot
 
