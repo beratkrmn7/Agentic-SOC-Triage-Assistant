@@ -1,7 +1,7 @@
 import time
-from typing import Any, Optional
+from typing import Optional
 from agent.models import IncidentState
-from agent.triage.models import TriageRunResult, TriageMetrics
+from agent.triage.models import TriageRunResult, TriageMetrics, TriageIncidentContext
 from agent.triage.enums import ReviewReason
 from agent.triage.provider import TriageProvider, TriageProviderRequest
 from agent.triage.input_builder import build_triage_input
@@ -16,12 +16,12 @@ class TriageRunner:
         self.cache = cache
         self.settings = get_settings()
 
-    def run(self, state: IncidentState, bundle: Any) -> TriageRunResult:
+    def run(self, state: IncidentState, context: TriageIncidentContext) -> TriageRunResult:
         start_time = time.monotonic()
         
         # 1. Build TriageInput
         triage_input = build_triage_input(
-            bundle=bundle,
+            context=context,
             detected_signals=state.get("detected_signals", []),
             candidate_evidence=state.get("candidate_evidence", [])
         )
@@ -42,7 +42,7 @@ class TriageRunner:
 
         if self.settings.triage_cache_enabled and self.cache:
             cache_key = build_cache_key(
-                incident_id=bundle.incident_id,
+                incident_id=context.incident.incident_id,
                 incident_content_hash=content_hash,
                 model=self.settings.llm_model,
                 provider=self.settings.llm_provider,
@@ -57,7 +57,7 @@ class TriageRunner:
 
         # Initialize Metrics
         metrics = TriageMetrics(
-            incident_id=bundle.incident_id,
+            incident_id=context.incident.incident_id,
             provider="groq",
             model=self.settings.llm_model,
             prompt_version=TRIAGE_PROMPT_VERSION,
@@ -94,7 +94,7 @@ class TriageRunner:
             )
 
         request = TriageProviderRequest(
-            incident_id=bundle.incident_id,
+            incident_id=context.incident.incident_id,
             triage_input=triage_input,
             system_prompt=system_prompt,
             context={"triage_input": triage_input},

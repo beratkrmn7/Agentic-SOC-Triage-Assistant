@@ -3,7 +3,9 @@ import datetime
 from unittest.mock import patch, MagicMock
 import time
 
-from agent.models import IncidentBundle, IncidentState
+from agent.models import IncidentState
+from agent.detection.models import IncidentBundle as DetectionIncidentBundle
+from agent.triage.models import TriageIncidentContext
 from agent.schema import CanonicalLogEvent
 from agent.triage.models import TriageSubmission, TriageClaim, EvidenceValidationResult, TriageInput, SafeEventView, EvidenceCandidate
 from agent.triage.enums import ClaimType, RejectionReason, TriageVerdict, TriageSeverity, ReviewReason
@@ -32,16 +34,35 @@ def _make_dummy_event(eid="E01"):
     )
 
 def test_actual_incidentbundle_round_trip():
-    bundle = IncidentBundle(
+    bundle = DetectionIncidentBundle(
         incident_id="INC-001",
-        incident_type_hint="test",
+        incident_type="test",
+        incident_family="test",
+        title="test",
+        severity="low",
+        confidence=1.0,
+        primary_entity="unknown",
+        target_entities=[],
+        signal_ids=[],
+        evidence=[],
+        metrics={},
+        mitre_techniques=[],
+        merge_key="mock",
+        event_ids=["E01"],
+        context_event_ids=["CTX01"],
+        first_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+        last_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+    )
+    
+    context = TriageIncidentContext(
+        incident=bundle,
         events=[_make_dummy_event("E01")],
         context_events=[_make_dummy_event("CTX01")]
     )
     
     state = IncidentState(
         incident_id="INC-001",
-        incident=bundle.model_dump(mode="json"),
+        incident=context.model_dump(mode="json"),
         canonical_events=[],
         messages=[],
         iteration_count=0,
@@ -113,21 +134,36 @@ def test_rate_limit_then_success():
         assert "base_delay" in kwargs
 
 def test_process_stable_content_hash():
-    bundle = IncidentBundle(
+    bundle = DetectionIncidentBundle(
         incident_id="INC-001",
-        incident_type_hint="test",
-        events=[_make_dummy_event("E01")]
+        incident_type="test",
+        incident_family="test",
+        title="test",
+        severity="low",
+        confidence=1.0,
+        primary_entity="unknown",
+        target_entities=[],
+        signal_ids=[],
+        evidence=[],
+        metrics={},
+        mitre_techniques=[],
+        merge_key="mock",
+        event_ids=["E01"],
+        context_event_ids=[],
+        first_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+        last_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
     )
+    context = TriageIncidentContext(incident=bundle, events=[_make_dummy_event("E01")])
     runner = TriageRunner(provider=MagicMock(), cache=InMemoryTriageCache())
     state = {}
     with patch.object(runner.provider, 'invoke', return_value=MagicMock(submission=None)) as mock_invoke:
-        runner.run(state, bundle)
+        runner.run(state, context)
         key1 = state["cache_key"]
         
     runner2 = TriageRunner(provider=MagicMock(), cache=InMemoryTriageCache())
     state2 = {}
     with patch.object(runner2.provider, 'invoke', return_value=MagicMock(submission=None)) as mock_invoke:
-        runner2.run(state2, bundle)
+        runner2.run(state2, context)
         key2 = state2["cache_key"]
         
     assert key1 == key2
@@ -150,12 +186,32 @@ def test_unknown_original_field_rejection():
         candidate_evidence=[
             EvidenceCandidate(
                 evidence_id="ev1", event_id="E01", quote="dummy log", reason="test", source="test",
-                original_fields={"non_existent_field": "value"}
+                canonical_fields={"non_existent_field": "value"}, vendor_original_fields={}
             )
         ]
     )
     
-    res = validate_evidence(sub, t_input, trusted)
+    bundle = DetectionIncidentBundle(
+        incident_id="INC-001",
+        incident_type="test",
+        incident_family="test",
+        title="test",
+        severity="low",
+        confidence=1.0,
+        primary_entity="unknown",
+        target_entities=[],
+        signal_ids=[],
+        evidence=[],
+        metrics={},
+        mitre_techniques=[],
+        merge_key="mock",
+        event_ids=["E01"],
+        context_event_ids=[],
+        first_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+        last_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+    )
+    context = TriageIncidentContext(incident=bundle, events=trusted)
+    res = validate_evidence(sub, t_input, context)
     assert len(res) == 1
     assert res[0].status == "rejected"
     
@@ -182,16 +238,31 @@ def test_supporting_event_id_validation():
     assert rejected[0]["reason"] == RejectionReason.EVIDENCE_REJECTED.value
 
 def test_prompt_budget_exceeded():
-    bundle = IncidentBundle(
+    bundle = DetectionIncidentBundle(
         incident_id="INC-001",
-        incident_type_hint="test",
-        events=[_make_dummy_event("E01")]
+        incident_type="test",
+        incident_family="test",
+        title="test",
+        severity="low",
+        confidence=1.0,
+        primary_entity="unknown",
+        target_entities=[],
+        signal_ids=[],
+        evidence=[],
+        metrics={},
+        mitre_techniques=[],
+        merge_key="mock",
+        event_ids=["E01"],
+        context_event_ids=[],
+        first_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+        last_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
     )
+    context = TriageIncidentContext(incident=bundle, events=[_make_dummy_event("E01")])
     settings = get_settings()
     settings.max_prompt_tokens = -1 # force fail
     runner = TriageRunner(provider=MagicMock(), cache=InMemoryTriageCache())
     state = {}
-    res = runner.run(state, bundle)
+    res = runner.run(state, context)
     assert res.review_reason == ReviewReason.PROMPT_BUDGET_EXCEEDED
     settings.max_prompt_tokens = 30000
 
@@ -211,15 +282,24 @@ def test_metrics_counters():
     )
     
     runner = TriageRunner(provider=provider_mock, cache=None)
-    bundle = IncidentBundle(incident_id="INC", incident_type_hint="test")
-    res = runner.run({}, bundle)
+    bundle = DetectionIncidentBundle(
+        incident_id="INC", incident_type="test", incident_family="test", title="test",
+        severity="low", confidence=1.0, primary_entity="unknown", target_entities=[],
+        signal_ids=[], evidence=[], metrics={}, mitre_techniques=[], merge_key="mock",
+        event_ids=[], context_event_ids=[],
+        first_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+        last_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+    )
+    context = TriageIncidentContext(incident=bundle, events=[])
+    res = runner.run({}, context)
     assert res.metrics.iteration_count == 3
     assert res.metrics.search_call_count == 2
     assert res.metrics.tool_call_count == 4
     assert res.metrics.provider_prompt_tokens == 100
     assert res.metrics.total_tokens == 150
 
-def test_ingest_detect_endpoints_zero_calls():
+@patch('agent.nodes.get_triage_runner')
+def test_ingest_detect_endpoints_zero_calls(mock_get_triage_runner):
     client = TestClient(fast_app)
     
     import tempfile
@@ -234,12 +314,18 @@ def test_ingest_detect_endpoints_zero_calls():
     with open(tf_name, "rb") as f:
         res = client.post("/detect/file", files={"file": f})
     assert res.status_code == 200
+    mock_get_triage_runner.assert_not_called()
 
 def test_graph_integration():
-    bundle = IncidentBundle(
-        incident_id="INC", incident_type_hint="bruteforce_success",
-        events=[_make_dummy_event("E01")]
+    bundle = DetectionIncidentBundle(
+        incident_id="INC", incident_type="bruteforce_success", incident_family="bruteforce_success", title="t",
+        severity="high", confidence=0.9, primary_entity="unknown", target_entities=[],
+        signal_ids=[], evidence=[], metrics={}, mitre_techniques=[], merge_key="mock",
+        event_ids=["E01"], context_event_ids=[],
+        first_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+        last_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
     )
+    context = TriageIncidentContext(incident=bundle, events=[_make_dummy_event("E01")])
     
     sub = TriageSubmission(
         triage_verdict=TriageVerdict.CONFIRMED_INCIDENT,
@@ -252,12 +338,12 @@ def test_graph_integration():
     
     state = {
         "incident_id": "INC",
-        "incident": bundle.model_dump(mode="json"),
+        "incident": context.model_dump(mode="json"),
         "triage_submission": sub.model_dump(),
         "safe_triage_input": TriageInput(
             incident_id="INC", incident_type="brute", incident_family="brute", title="t",
             deterministic_severity="high", deterministic_confidence=1.0, first_seen="", last_seen="", primary_entity="",
-            candidate_evidence=[EvidenceCandidate(evidence_id="ev1", event_id="E01", quote="dummy log", reason="test", source="test", original_fields={"test_field": "test_value"})]
+            candidate_evidence=[EvidenceCandidate(evidence_id="ev1", event_id="E01", quote="dummy log", reason="test", source="test", canonical_fields={}, vendor_original_fields={"test_field": "test_value"})]
         ).model_dump()
     }
     

@@ -1,5 +1,5 @@
 from typing import List
-from agent.triage.models import TriageInput, TriageSubmission, EvidenceValidationResult
+from agent.triage.models import TriageInput, TriageSubmission, EvidenceValidationResult, TriageIncidentContext
 from agent.triage.enums import RejectionReason
 
 def normalize_text(text: str) -> str:
@@ -9,18 +9,17 @@ def normalize_text(text: str) -> str:
     import re
     return re.sub(r'\s+', ' ', text.strip().lower())
 
-from agent.schema import CanonicalLogEvent
-
 def validate_evidence(
     submission: TriageSubmission, 
     triage_input: TriageInput,
-    trusted_events: List[CanonicalLogEvent]
+    context: TriageIncidentContext
 ) -> List[EvidenceValidationResult]:
     results = []
     
-    # Pre-compute valid IDs
     valid_candidate_ids = {c.evidence_id: c for c in triage_input.candidate_evidence}
+    trusted_events = context.events + context.context_events
     trusted_event_map = {e.event_id: e for e in trusted_events}
+    detection_evidence_map = {ev.event_id: ev for ev in context.incident.evidence}
     
     seen_ids = set()
     
@@ -74,17 +73,41 @@ def validate_evidence(
                 ))
                 continue
                 
-        # Validate original_fields parity
-        if candidate.original_fields:
+        # Validate canonical fields parity
+        if candidate.canonical_fields:
+            mismatch = False
+            missing = False
+            
+            for k, v in candidate.canonical_fields.items():
+                if hasattr(trusted_event, k):
+                    val = getattr(trusted_event, k)
+                    if str(val) != str(v):
+                        mismatch = True
+                        break
+                else:
+                    missing = True
+                    break
+                    
+            if missing or mismatch:
+                results.append(EvidenceValidationResult(
+                    evidence_id=ev_id,
+                    event_id=candidate.event_id,
+                    status="rejected",
+                    rejection_reason=RejectionReason.EVIDENCE_REJECTED # Mismatch fields
+                ))
+                continue
+                
+        # Validate vendor original fields parity
+        if candidate.vendor_original_fields:
             mismatch = False
             missing = False
             original_log = trusted_event.original_log or {}
             
-            for k, v in candidate.original_fields.items():
+            for k, v in candidate.vendor_original_fields.items():
                 if k not in original_log:
                     missing = True
                     break
-                if original_log[k] != v:
+                if str(original_log[k]) != str(v):
                     mismatch = True
                     break
                     
@@ -99,14 +122,26 @@ def validate_evidence(
                 
         # Validate source/provenance
         if candidate.source:
-            if candidate.source != trusted_event.source_name and candidate.source != trusted_event.parser_name:
-                results.append(EvidenceValidationResult(
-                    evidence_id=ev_id,
-                    event_id=candidate.event_id,
-                    status="rejected",
-                    rejection_reason=RejectionReason.EVIDENCE_REJECTED # Mismatch source
-                ))
-                continue
+            if candidate.event_id in detection_evidence_map:
+                original_evidence = detection_evidence_map[candidate.event_id]
+                if candidate.source != original_evidence.source:
+                    results.append(EvidenceValidationResult(
+                        evidence_id=ev_id,
+                        event_id=candidate.event_id,
+                        status="rejected",
+                        rejection_reason=RejectionReason.EVIDENCE_REJECTED # Mismatch source provenance
+                    ))
+                    continue
+            else:
+                # If it's a context event or dynamically found event, source should match parser/source_name
+                if candidate.source != trusted_event.source_name and candidate.source != trusted_event.parser_name:
+                    results.append(EvidenceValidationResult(
+                        evidence_id=ev_id,
+                        event_id=candidate.event_id,
+                        status="rejected",
+                        rejection_reason=RejectionReason.EVIDENCE_REJECTED # Mismatch source
+                    ))
+                    continue
                 
         # Validate correlation context (ensure it relates to the incident)
         if candidate.correlation_context:

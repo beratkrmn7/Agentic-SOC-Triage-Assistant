@@ -45,10 +45,10 @@ class GroqTriageProvider(TriageProvider):
         def _call():
             try:
                 llm_with_tools = self.llm.bind_tools(tools)
-                config: Any = {}
+                kwargs: Any = {}
                 if timeout is not None:
-                    config["timeout"] = max(0.1, timeout)
-                return llm_with_tools.invoke(messages, config=config)
+                    kwargs["timeout"] = max(0.1, timeout)
+                return llm_with_tools.invoke(messages, **kwargs)
             except groq.RateLimitError as e:
                 raise ProviderRateLimitError(str(e))
             except groq.APITimeoutError as e:

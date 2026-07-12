@@ -1,6 +1,13 @@
 from typing import List, Any, Optional, Literal
 from pydantic import BaseModel, Field, model_validator
 from agent.triage.enums import TriageVerdict, TriageSeverity, ClaimType, RejectionReason, ReviewReason
+from agent.schema import CanonicalLogEvent
+from agent.detection.models import IncidentBundle as DetectionIncidentBundle
+
+class TriageIncidentContext(BaseModel):
+    incident: DetectionIncidentBundle
+    events: List[CanonicalLogEvent] = Field(default_factory=list)
+    context_events: List[CanonicalLogEvent] = Field(default_factory=list)
 
 class SafeEventView(BaseModel):
     event_id: str
@@ -26,7 +33,8 @@ class EvidenceCandidate(BaseModel):
     quote: str
     reason: str
     source: str
-    original_fields: dict[str, Any] = Field(default_factory=dict)
+    canonical_fields: dict[str, Any] = Field(default_factory=dict)
+    vendor_original_fields: dict[str, Any] = Field(default_factory=dict)
     correlation_context: dict[str, Any] = Field(default_factory=dict)
 
 class TriageInput(BaseModel):

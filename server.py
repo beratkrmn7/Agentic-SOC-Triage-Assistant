@@ -118,16 +118,38 @@ def analyze_incident(req: AnalyzeRequest):
     processed_logs = ingest_pipeline.ingest_records(raw_logs, source_name="mock_api").events
     canonical_events = [log.model_dump(mode="json") for log in processed_logs]
 
-    from agent.models import IncidentBundle
-    bundle = IncidentBundle(
+    from agent.detection.models import IncidentBundle as DetectionIncidentBundle
+    from agent.triage.models import TriageIncidentContext
+    from datetime import datetime, timezone
+    event_ids = [e.event_id for e in processed_logs]
+    bundle = DetectionIncidentBundle(
         incident_id=req.incident_id,
-        incident_type_hint="other",
-        events=processed_logs
+        incident_type="other",
+        incident_family="other",
+        title="Mock Incident",
+        severity="low",
+        confidence=0.5,
+        first_seen=datetime.now(timezone.utc),
+        last_seen=datetime.now(timezone.utc),
+        primary_entity="unknown",
+        target_entities=[],
+        signal_ids=[],
+        event_ids=event_ids,
+        context_event_ids=[],
+        evidence=[],
+        metrics={},
+        mitre_techniques=[],
+        merge_key="mock"
+    )
+    context = TriageIncidentContext(
+        incident=bundle,
+        events=processed_logs,
+        context_events=[]
     )
 
     initial_state: IncidentState = {
         "incident_id": req.incident_id,
-        "incident": bundle.model_dump(mode="json"),
+        "incident": context.model_dump(mode="json"),
         "canonical_events": canonical_events, 
         "messages": [],
         "iteration_count": 0,
@@ -296,10 +318,19 @@ async def analyze_file(file: UploadFile = File(...)):
                     "original_fields": ev.original_fields,
                     "correlation_context": ev.correlation_context
                 })
-                    
+            context_events = [event_map[eid] for eid in inc.context_event_ids if eid in event_map]
+            
+            from agent.triage.models import TriageIncidentContext
+            from agent.schema import CanonicalLogEvent
+            context = TriageIncidentContext(
+                incident=inc,
+                events=[CanonicalLogEvent(**e) for e in canonical_events],
+                context_events=[CanonicalLogEvent(**e) for e in context_events]
+            )
+
             initial_state: IncidentState = {
                 "incident_id": inc.incident_id,
-                "incident": inc.model_dump(mode="json"),
+                "incident": context.model_dump(mode="json"),
                 "canonical_events": canonical_events,
                 "messages": [],
                 "iteration_count": 0,

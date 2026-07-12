@@ -13,8 +13,25 @@ def test_evidence_validation_success():
             "claims": []
         },
         "incident": {
-            "incident_id": "TEST-01",
-            "incident_type_hint": "other",
+            "incident": {
+                "incident_id": "TEST-01",
+                "incident_type": "test",
+                "incident_family": "test",
+                "title": "test",
+                "severity": "low",
+                "confidence": 1.0,
+                "primary_entity": "unknown",
+                "target_entities": [],
+                "signal_ids": [],
+                "evidence": [],
+                "metrics": {},
+                "mitre_techniques": [],
+                "merge_key": "mock",
+                "event_ids": ["1"],
+                "context_event_ids": [],
+                "first_seen": "2024-01-01T00:00:00Z",
+                "last_seen": "2024-01-01T00:00:00Z"
+            },
             "events": [{"event_id": "1", "timestamp": None, "observed_at": "2024-01-01T00:00:00Z", "parse_status": "success", "parser_name": "test", "source_name": "test", "raw_message": "test", "original_log": {}}],
             "context_events": []
         },
@@ -31,7 +48,7 @@ def test_evidence_validation_success():
             "incident_type_hint": "other",
             "detected_signals": [],
             "candidate_evidence": [
-                {"evidence_id": "E1", "event_id": "1", "quote": "test", "reason": "test", "source": "test"}
+                {"evidence_id": "E1", "event_id": "1", "quote": "test", "reason": "test", "source": "test", "canonical_fields": {}, "vendor_original_fields": {}}
             ],
             "limited_context_events": [
                 {"event_id": "1", "event_type": "test", "source_ip": "1.1.1.1", "raw_message": "test", "timestamp": "2024-01-01T00:00:00Z", "parser_name": "test", "source_name": "test"}
@@ -57,8 +74,25 @@ def test_evidence_validation_mismatch():
             "claims": []
         },
         "incident": {
-            "incident_id": "TEST-01",
-            "incident_type_hint": "other",
+            "incident": {
+                "incident_id": "TEST-01",
+                "incident_type": "test",
+                "incident_family": "test",
+                "title": "test",
+                "severity": "low",
+                "confidence": 1.0,
+                "primary_entity": "unknown",
+                "target_entities": [],
+                "signal_ids": [],
+                "evidence": [],
+                "metrics": {},
+                "mitre_techniques": [],
+                "merge_key": "mock",
+                "event_ids": ["1"],
+                "context_event_ids": [],
+                "first_seen": "2024-01-01T00:00:00Z",
+                "last_seen": "2024-01-01T00:00:00Z"
+            },
             "events": [{"event_id": "1", "timestamp": None, "observed_at": "2024-01-01T00:00:00Z", "parse_status": "success", "parser_name": "test", "source_name": "test", "raw_message": "test", "original_log": {}}],
             "context_events": []
         },
@@ -96,8 +130,25 @@ def test_evidence_validation_false_positive_missing_evidence():
             "claims": []
         },
         "incident": {
-            "incident_id": "TEST-01",
-            "incident_type_hint": "other",
+            "incident": {
+                "incident_id": "TEST-01",
+                "incident_type": "test",
+                "incident_family": "test",
+                "title": "test",
+                "severity": "low",
+                "confidence": 1.0,
+                "primary_entity": "unknown",
+                "target_entities": [],
+                "signal_ids": [],
+                "evidence": [],
+                "metrics": {},
+                "mitre_techniques": [],
+                "merge_key": "mock",
+                "event_ids": ["1"],
+                "context_event_ids": [],
+                "first_seen": "2024-01-01T00:00:00Z",
+                "last_seen": "2024-01-01T00:00:00Z"
+            },
             "events": [{"event_id": "1", "timestamp": None, "observed_at": "2024-01-01T00:00:00Z", "parse_status": "success", "parser_name": "test", "source_name": "test", "raw_message": "test", "original_log": {}}],
             "context_events": []
         },

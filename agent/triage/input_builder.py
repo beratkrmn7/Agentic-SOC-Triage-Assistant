@@ -1,6 +1,5 @@
-from typing import List, Dict, Any, cast
-from agent.models import IncidentBundle
-from agent.triage.models import TriageInput, SafeEventView, EvidenceCandidate
+from typing import List, Dict, Any
+from agent.triage.models import TriageInput, SafeEventView, EvidenceCandidate, TriageIncidentContext
 from agent.config import get_settings
 from agent.schema import CanonicalLogEvent
 import hashlib
@@ -37,7 +36,7 @@ def _build_safe_event(event: CanonicalLogEvent, max_preview_chars: int = 1000) -
     )
 
 def build_triage_input(
-    bundle: IncidentBundle,
+    context: TriageIncidentContext,
     detected_signals: List[Dict[str, Any]],
     candidate_evidence: List[Dict[str, Any]]
 ) -> TriageInput:
@@ -48,10 +47,10 @@ def build_triage_input(
     max_candidate_evidence = settings.max_candidate_evidence
     
     # Sort events deterministically by timestamp then event_id
-    sorted_events = sorted(bundle.events, key=lambda e: (e.timestamp or "", e.event_id))
+    sorted_events = sorted(context.events, key=lambda e: (e.timestamp or "", e.event_id))
     safe_events = [_build_safe_event(e, max_preview_chars) for e in sorted_events]
     
-    sorted_context = sorted(bundle.context_events, key=lambda e: (e.timestamp or "", e.event_id))
+    sorted_context = sorted(context.context_events, key=lambda e: (e.timestamp or "", e.event_id))
     safe_context = [_build_safe_event(e, max_preview_chars) for e in sorted_context]
     
     signal_summaries = []
@@ -65,7 +64,7 @@ def build_triage_input(
         reason = ev.get('reason', '')
         source = ev.get('source', '')
         event_id = ev.get('event_id', '')
-        ev_id = generate_evidence_id(bundle.incident_id, event_id, source, quote, reason)
+        ev_id = generate_evidence_id(context.incident.incident_id, event_id, source, quote, reason)
         
         ev_candidates.append(EvidenceCandidate(
             evidence_id=ev_id,
@@ -73,7 +72,8 @@ def build_triage_input(
             quote=quote,
             reason=reason,
             source=source,
-            original_fields=ev.get('original_fields', {}),
+            canonical_fields=ev.get('original_fields', {}),
+            vendor_original_fields=ev.get('original_log', {}),
             correlation_context=ev.get('correlation_context', {})
         ))
         
@@ -84,28 +84,29 @@ def build_triage_input(
     
     mitre_set = set()
     for sig in detected_signals:
-        if sig.get('mitre_techniques'):
-            mitre_set.add(sig.get('mitre_techniques')[0])
+        mitre_techs = sig.get('mitre_techniques')
+        if mitre_techs and isinstance(mitre_techs, list) and len(mitre_techs) > 0:
+            mitre_set.add(mitre_techs[0])
     
     p_warns = set()
     dq_warns = set()
-    for e in bundle.events + bundle.context_events:
+    for e in context.events + context.context_events:
         for w in getattr(e, 'parse_warnings', []):
             p_warns.add(w)
         for w in getattr(e, 'data_quality_warnings', []):
             dq_warns.add(w)
             
     return TriageInput(
-        incident_id=bundle.incident_id,
-        incident_type=bundle.incident_type_hint,
-        incident_family=bundle.incident_type_hint, # Usually similar or derived
-        title=f"Suspicious Activity detected: {bundle.incident_type_hint}",
-        deterministic_severity=bundle.severity_hint or "low",
-        deterministic_confidence=bundle.confidence_hint or 0.0,
-        first_seen=bundle.first_seen.isoformat() if bundle.first_seen else "",
-        last_seen=bundle.last_seen.isoformat() if bundle.last_seen else "",
-        primary_entity=cast(list, bundle.source_ips)[0] if bundle.source_ips else "unknown",
-        target_entities=bundle.destination_ips,
+        incident_id=context.incident.incident_id,
+        incident_type=context.incident.incident_type,
+        incident_family=context.incident.incident_family,
+        title=context.incident.title,
+        deterministic_severity=context.incident.severity,
+        deterministic_confidence=context.incident.confidence,
+        first_seen=context.incident.first_seen.isoformat() if context.incident.first_seen else "",
+        last_seen=context.incident.last_seen.isoformat() if context.incident.last_seen else "",
+        primary_entity=context.incident.primary_entity,
+        target_entities=context.incident.target_entities,
         signal_summaries=signal_summaries,
         candidate_evidence=ev_candidates,
         limited_context_events=limited_events,

@@ -3,7 +3,9 @@ from agent.triage.provider import TriageProvider, TriageProviderResponse, Triage
 from agent.triage.exceptions import ProviderTimeoutError
 from agent.triage.enums import ReviewReason, TriageVerdict, TriageSeverity
 from agent.triage.models import TriageSubmission
-from agent.models import IncidentBundle
+from agent.detection.models import IncidentBundle as DetectionIncidentBundle
+from agent.triage.models import TriageIncidentContext
+import datetime
 import time
 
 class SlowFakeProvider(TriageProvider):
@@ -30,20 +32,30 @@ def test_triage_runner_global_timeout():
     runner = TriageRunner(provider=provider)
     runner.settings.triage_timeout_seconds = 0.1 # Very short timeout
     
-    bundle = IncidentBundle(
+    bundle = DetectionIncidentBundle(
         incident_id="INC-1",
-        incident_type_hint="test",
-        source_ips=[],
-        destination_ips=[],
-        destination_ports=[],
+        incident_type="test",
+        incident_family="test",
+        title="test",
+        severity="low",
+        confidence=1.0,
+        primary_entity="unknown",
+        target_entities=[],
+        signal_ids=[],
+        evidence=[],
+        metrics={},
+        mitre_techniques=[],
+        merge_key="mock",
         event_ids=[],
-        events=[],
-        context_events=[]
+        context_event_ids=[],
+        first_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+        last_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
     )
+    context = TriageIncidentContext(incident=bundle, events=[])
     
     state = {"incident_id": "INC-1", "detected_signals": [], "candidate_evidence": []}
     
-    result = runner.run(state, bundle)
+    result = runner.run(state, context)
     assert result.submission is not None
     assert result.submission.triage_verdict == TriageVerdict.NEEDS_REVIEW
     assert result.review_reason == ReviewReason.PROVIDER_TIMEOUT
@@ -53,20 +65,30 @@ def test_triage_runner_provider_timeout_exception():
     provider = ExceptionFakeProvider()
     runner = TriageRunner(provider=provider)
     
-    bundle = IncidentBundle(
+    bundle = DetectionIncidentBundle(
         incident_id="INC-1",
-        incident_type_hint="test",
-        source_ips=[],
-        destination_ips=[],
-        destination_ports=[],
+        incident_type="test",
+        incident_family="test",
+        title="test",
+        severity="low",
+        confidence=1.0,
+        primary_entity="unknown",
+        target_entities=[],
+        signal_ids=[],
+        evidence=[],
+        metrics={},
+        mitre_techniques=[],
+        merge_key="mock",
         event_ids=[],
-        events=[],
-        context_events=[]
+        context_event_ids=[],
+        first_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+        last_seen=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
     )
+    context = TriageIncidentContext(incident=bundle, events=[])
     
     state = {"incident_id": "INC-1", "detected_signals": [], "candidate_evidence": []}
     
-    result = runner.run(state, bundle)
+    result = runner.run(state, context)
     assert result.submission is not None
     assert result.submission.triage_verdict == TriageVerdict.NEEDS_REVIEW
     assert result.review_reason == ReviewReason.PROVIDER_TIMEOUT

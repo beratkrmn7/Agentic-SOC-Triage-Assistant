@@ -2,7 +2,7 @@ import json
 import re
 import datetime
 import logging
-from typing import Any, Optional
+from typing import Any
 from dotenv import load_dotenv
 
 from agent.config import get_settings
@@ -217,7 +217,7 @@ def triage_node(state: IncidentState) -> dict:
     """
     logger.info(f"--- TRIAGE AGENT: Running secure agentic triage for {state['incident_id']} ---")
     
-    from agent.models import IncidentBundle
+    from agent.triage.models import TriageIncidentContext
     
     incident_dict = state.get("incident")
     if not incident_dict:
@@ -229,12 +229,13 @@ def triage_node(state: IncidentState) -> dict:
             "confidence_score": 0.0,
             "evidence": [],
             "review_reason": ReviewReason.INVALID_LLM_OUTPUT.value,
-            "errors": ["State validation failed: missing incident bundle."]
+            "errors": ["invalid_incident_state"]
         }
         
     try:
-        bundle = IncidentBundle(**incident_dict)
+        context = TriageIncidentContext(**incident_dict)
     except Exception as e:
+        logger.error(f"State validation failed for incident: {e}")
         return {
             "triage_verdict": "needs_review",
             "incident_type": "other",
@@ -242,12 +243,12 @@ def triage_node(state: IncidentState) -> dict:
             "confidence_score": 0.0,
             "evidence": [],
             "review_reason": ReviewReason.INVALID_LLM_OUTPUT.value,
-            "errors": [f"State validation failed: {e}"]
+            "errors": ["invalid_incident_state"]
         }
 
     try:
         runner = get_triage_runner()
-        result = runner.run(state, bundle)
+        result = runner.run(state, context)
         
         triage_dict = {
             "iteration_count": result.metrics.iteration_count,
@@ -297,8 +298,7 @@ def evidence_validation_node(state: IncidentState) -> dict:
     """
     logger.info(f"--- VALIDATION NODE: Validating evidence for {state['incident_id']} ---")
     
-    from agent.triage.models import TriageSubmission, TriageInput
-    from agent.models import IncidentBundle
+    from agent.triage.models import TriageSubmission, TriageInput, TriageIncidentContext
     
     submission_dict = state.get("triage_submission")
     triage_input_dict = state.get("safe_triage_input")
@@ -317,11 +317,21 @@ def evidence_validation_node(state: IncidentState) -> dict:
         
     submission = TriageSubmission(**submission_dict)
     triage_input = TriageInput(**triage_input_dict)
-    bundle = IncidentBundle(**incident_dict)
+    try:
+        context = TriageIncidentContext(**incident_dict)
+    except Exception as e:
+        logger.error(f"Failed to parse TriageIncidentContext in validation node: {e}")
+        return {
+            "validated_evidence": [],
+            "rejected_evidence": [],
+            "claims": [],
+            "triage_verdict": "needs_review",
+            "severity": "none",
+            "confidence_score": 0.0,
+            "review_reason": ReviewReason.INVALID_LLM_OUTPUT.value
+        }
     
-    trusted_events = bundle.events + bundle.context_events
-    
-    ev_results = validate_evidence(submission, triage_input, trusted_events)
+    ev_results = validate_evidence(submission, triage_input, context)
     accepted_claims, rejected_claims = validate_claims(submission.claims, ev_results)
     
     # Check if needs_review fallback applies
