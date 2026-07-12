@@ -23,8 +23,8 @@ from langchain_groq import ChatGroq
 import groq
 
 class GroqTriageProvider(TriageProvider):
-    def __init__(self, model_name: str = "llama3-70b-8192", circuit_breaker: Optional['CircuitBreaker'] = None, llm: Optional[Any] = None):
-        self.settings = get_settings()
+    def __init__(self, model_name: str = "llama3-70b-8192", circuit_breaker: Optional['CircuitBreaker'] = None, llm: Optional[Any] = None, settings: Optional[Any] = None):
+        self.settings = settings or get_settings()
         self.circuit_breaker = circuit_breaker or CircuitBreaker()
         
         if not self.settings.llm_enabled:

@@ -156,8 +156,8 @@ def test_true_interrupting_provider_timeout():
         assert result.submission.severity == TriageSeverity.NONE
         assert result.submission.confidence_score == 0.0
 
-def test_auth_failure_mapping():
-    provider = GroqTriageProvider(llm=MagicMock())
+def test_auth_failure_mapping(triage_test_settings):
+    provider = GroqTriageProvider(llm=MagicMock(), settings=triage_test_settings)
     
     with patch.object(provider, '_invoke_with_circuit_breaker', side_effect=ProviderAuthenticationError("auth failed")):
         with pytest.raises(ProviderAuthenticationError):

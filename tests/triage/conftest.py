@@ -1,5 +1,6 @@
 import pytest
 from typing import List, Any
+from agent.config import Settings
 
 class FakeRunnable:
     def __init__(self, actions: List[Any]):
@@ -30,3 +31,13 @@ def fake_llm():
     def _create(actions: List[Any]):
         return ScriptableFakeLLM(actions)
     return _create
+
+@pytest.fixture
+def triage_test_settings():
+    return Settings(
+        llm_enabled=True,
+        groq_api_key=None,
+        llm_max_retries=0,
+        llm_retry_base_seconds=0.01,
+        llm_retry_max_seconds=0.01,
+    )
