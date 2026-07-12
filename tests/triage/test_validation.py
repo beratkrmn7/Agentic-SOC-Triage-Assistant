@@ -46,7 +46,10 @@ def test_validate_evidence_success():
         ]
     )
     
-    results = validate_evidence(submission, triage_input)
+    from agent.schema import CanonicalLogEvent
+    from datetime import datetime, timezone
+    trusted_events = [CanonicalLogEvent(event_id="EVT-1", timestamp=None, observed_at=datetime.now(timezone.utc), parse_status="success", parser_name="test_parser", source_name="test_source", raw_message="An error occurred here", original_log={"src_ip": "1.2.3.4"})]
+    results = validate_evidence(submission, triage_input, trusted_events)
     assert len(results) == 1
     assert results[0].status == "validated"
 
@@ -93,7 +96,10 @@ def test_validate_evidence_quote_mismatch():
         ]
     )
     
-    results = validate_evidence(submission, triage_input)
+    from agent.schema import CanonicalLogEvent
+    from datetime import datetime, timezone
+    trusted_events = [CanonicalLogEvent(event_id="EVT-1", timestamp=None, observed_at=datetime.now(timezone.utc), parse_status="success", parser_name="test_parser", source_name="test_source", raw_message="An error occurred here", original_log={"src_ip": "1.2.3.4"})]
+    results = validate_evidence(submission, triage_input, trusted_events)
     assert len(results) == 1
     assert results[0].status == "rejected"
     assert results[0].rejection_reason == RejectionReason.EVIDENCE_REJECTED
@@ -141,7 +147,10 @@ def test_validate_evidence_fields_mismatch():
         ]
     )
     
-    results = validate_evidence(submission, triage_input)
+    from agent.schema import CanonicalLogEvent
+    from datetime import datetime, timezone
+    trusted_events = [CanonicalLogEvent(event_id="EVT-1", timestamp=None, observed_at=datetime.now(timezone.utc), parse_status="success", parser_name="test_parser", source_name="test_source", raw_message="An error occurred here", original_log={"src_ip": "1.2.3.4"})]
+    results = validate_evidence(submission, triage_input, trusted_events)
     assert len(results) == 1
     assert results[0].status == "rejected"
     assert results[0].rejection_reason == RejectionReason.EVIDENCE_REJECTED
@@ -151,15 +160,17 @@ def test_validate_claims():
     claims = [
         TriageClaim(
             claim_id="cl_1",
-            claim_type=ClaimType.ACCOUNT_COMPROMISE,
+            claim_type=ClaimType.OTHER,
             statement="Test",
-            supporting_evidence_ids=["ev_1"]
+            supporting_evidence_ids=["ev_1"],
+            supporting_event_ids=["EVT-1"]
         ),
         TriageClaim(
             claim_id="cl_2",
-            claim_type=ClaimType.ACCOUNT_COMPROMISE,
+            claim_type=ClaimType.OTHER,
             statement="Test",
-            supporting_evidence_ids=["ev_2"] # Hallucinated or rejected
+            supporting_evidence_ids=["ev_2"], # Hallucinated or rejected
+            supporting_event_ids=["EVT-1"]
         )
     ]
     

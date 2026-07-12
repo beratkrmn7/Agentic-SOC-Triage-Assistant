@@ -39,7 +39,13 @@ def validate_claims(claims: List[TriageClaim], validated_evidence: List[Evidence
                 all_support_valid = False
                 break
                 
-        if not claim.supporting_evidence_ids:
+        valid_event_ids = {r.event_id for r in validated_evidence if r.status == "validated"}
+        for event_id in claim.supporting_event_ids:
+            if event_id not in valid_event_ids:
+                all_support_valid = False
+                break
+                
+        if not claim.supporting_evidence_ids or not claim.supporting_event_ids:
             rejected_claims.append({
                 "claim_id": claim.claim_id,
                 "reason": RejectionReason.MISSING_SUPPORTING_EVIDENCE.value
@@ -53,9 +59,12 @@ def validate_claims(claims: List[TriageClaim], validated_evidence: List[Evidence
             })
             continue
             
-        # Specific claim type validation could be added here
-        # For now, if a high impact claim has validated evidence, we accept it.
-        # But we ensure it has at least ONE piece of valid evidence.
+        if claim.claim_type in HIGH_IMPACT_CLAIMS:
+            rejected_claims.append({
+                "claim_id": claim.claim_id,
+                "reason": RejectionReason.UNSUPPORTED_CLAIM_TYPE.value
+            })
+            continue
         
         accepted_claims.append(claim)
         

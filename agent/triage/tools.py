@@ -19,7 +19,9 @@ class SearchLogsTool:
             raise ProviderMaxSearchCallsError(f"Maximum search calls ({self.max_calls}) reached")
             
         if len(query) > self.max_query_chars:
-            query = query[:self.max_query_chars]
+            from agent.triage.exceptions import TriageProviderError
+            from agent.triage.enums import ReviewReason
+            raise TriageProviderError(f"Search query exceeds maximum allowed characters ({self.max_query_chars})", ReviewReason.INVALID_TOOL_CALL)
             
         q_lower = query.lower()
         matched = []

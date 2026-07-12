@@ -217,51 +217,33 @@ def triage_node(state: IncidentState) -> dict:
     """
     logger.info(f"--- TRIAGE AGENT: Running secure agentic triage for {state['incident_id']} ---")
     
-    # Needs the IncidentBundle to pass to runner
     from agent.models import IncidentBundle
-    # We must reconstruct the real IncidentBundle from the serialized dict state exactly.
-    from agent.schema import CanonicalLogEvent
-    bundle_events = []
     
-    # Fallback for invalid events to be machine-readable instead of silent pass
-    for cd in state.get("canonical_events", []):
-        try:
-            bundle_events.append(CanonicalLogEvent(**cd))
-        except Exception as e:
-            # Generate a machine-readable fallback for parser/data quality tracking
-            fallback = CanonicalLogEvent(
-                event_id=cd.get("event_id", "EVT-INVALID"),
-                observed_at=cd.get("observed_at", datetime.datetime.now(datetime.timezone.utc)),
-                parser_name="invalid_fallback",
-                source_name=cd.get("source_name", "unknown"),
-                raw_message=cd.get("raw_message", ""),
-                parse_status="failed",
-                parse_warnings=[f"Failed to load CanonicalLogEvent from state: {e}"]
-            )
-            bundle_events.append(fallback)
-
-    def _parse_dt(dt_str: object) -> Optional[datetime.datetime]:
-        if not dt_str:
-            return None
-        if isinstance(dt_str, datetime.datetime):
-            return dt_str
-        try:
-            return datetime.datetime.fromisoformat(str(dt_str).replace('Z', '+00:00'))
-        except Exception:
-            return None
-
-    bundle = IncidentBundle(
-        incident_id=state['incident_id'],
-        incident_type_hint=state.get('incident_type', 'other'),
-        first_seen=_parse_dt(state.get('first_seen')),
-        last_seen=_parse_dt(state.get('last_seen')),
-        source_ips=list(state.get('entities', {}).get('ips', [])),
-        destination_ips=list(state.get('destination_ips', []) or []), # type: ignore
-        destination_ports=list(state.get('destination_ports', []) or []), # type: ignore
-        event_ids=list(state.get('event_ids', [e.event_id for e in bundle_events]) or []), # type: ignore
-        events=bundle_events,
-        context_events=[] # Phase 3 populates this separately if needed
-    )
+    incident_dict = state.get("incident")
+    if not incident_dict:
+        # Fallback if no incident bundle is provided
+        return {
+            "triage_verdict": "needs_review",
+            "incident_type": "other",
+            "severity": "none",
+            "confidence_score": 0.0,
+            "evidence": [],
+            "review_reason": ReviewReason.INVALID_LLM_OUTPUT.value,
+            "errors": ["State validation failed: missing incident bundle."]
+        }
+        
+    try:
+        bundle = IncidentBundle(**incident_dict)
+    except Exception as e:
+        return {
+            "triage_verdict": "needs_review",
+            "incident_type": "other",
+            "severity": "none",
+            "confidence_score": 0.0,
+            "evidence": [],
+            "review_reason": ReviewReason.INVALID_LLM_OUTPUT.value,
+            "errors": [f"State validation failed: {e}"]
+        }
 
     try:
         runner = get_triage_runner()
@@ -316,10 +298,13 @@ def evidence_validation_node(state: IncidentState) -> dict:
     logger.info(f"--- VALIDATION NODE: Validating evidence for {state['incident_id']} ---")
     
     from agent.triage.models import TriageSubmission, TriageInput
+    from agent.models import IncidentBundle
+    
     submission_dict = state.get("triage_submission")
     triage_input_dict = state.get("safe_triage_input")
+    incident_dict = state.get("incident")
     
-    if not submission_dict or not triage_input_dict:
+    if not submission_dict or not triage_input_dict or not incident_dict:
         return {
             "validated_evidence": [],
             "rejected_evidence": [],
@@ -332,8 +317,11 @@ def evidence_validation_node(state: IncidentState) -> dict:
         
     submission = TriageSubmission(**submission_dict)
     triage_input = TriageInput(**triage_input_dict)
+    bundle = IncidentBundle(**incident_dict)
     
-    ev_results = validate_evidence(submission, triage_input)
+    trusted_events = bundle.events + bundle.context_events
+    
+    ev_results = validate_evidence(submission, triage_input, trusted_events)
     accepted_claims, rejected_claims = validate_claims(submission.claims, ev_results)
     
     # Check if needs_review fallback applies
@@ -399,17 +387,17 @@ def action_recommendation_node(state: IncidentState) -> dict:
             actions.append("Consider tuning alert rules if this alert triggers frequently for normal traffic.")
     elif verdict in ["suspicious", "confirmed_incident"]:
         if incident_type == "sql_injection":
-            actions.extend(["Update WAF rules to block signature.", "Check database integrity.", "Endpoint validation."])
+            actions.extend(["SOC Analyst should evaluate updating WAF rules to block signature.", "SOC Analyst should verify database integrity.", "SOC Analyst should perform endpoint validation."])
         elif incident_type == "bruteforce_success":
-            actions.extend(["Lock compromised account.", "Review session logs.", "Force password reset."])
+            actions.extend(["SOC Analyst should evaluate locking the compromised account.", "SOC Analyst should review session logs.", "SOC Analyst should evaluate forcing a password reset."])
         elif incident_type == "powershell":
-            actions.extend(["Isolate target host.", "Review process tree.", "Initiate EDR deep scan."])
+            actions.extend(["SOC Analyst should evaluate isolating the target host.", "SOC Analyst should review process tree.", "SOC Analyst should evaluate initiating an EDR deep scan."])
         elif incident_type == "dns_tunneling":
-            actions.extend(["Review DNS logs.", "Block malicious domains.", "Investigate source endpoint."])
+            actions.extend(["SOC Analyst should review DNS logs.", "SOC Analyst should evaluate blocking malicious domains.", "SOC Analyst should investigate the source endpoint."])
         elif incident_type == "lateral_movement":
-            actions.extend(["Isolate target host.", "Review admin credentials.", "Check SMB/PsExec logs."])
+            actions.extend(["SOC Analyst should evaluate isolating the target host.", "SOC Analyst should review admin credentials.", "SOC Analyst should check SMB/PsExec logs."])
         else:
-            actions.extend(["Investigate source IP.", "Check authentication logs.", "Consider temporary IP blocking."])
+            actions.extend(["SOC Analyst should investigate the source IP.", "SOC Analyst should check authentication logs.", "SOC Analyst should consider temporary IP blocking."])
             
     return {"recommended_actions": actions, "mitre_techniques": mitre_techniques}
 

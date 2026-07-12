@@ -9,12 +9,18 @@ def normalize_text(text: str) -> str:
     import re
     return re.sub(r'\s+', ' ', text.strip().lower())
 
-def validate_evidence(submission: TriageSubmission, triage_input: TriageInput) -> List[EvidenceValidationResult]:
+from agent.schema import CanonicalLogEvent
+
+def validate_evidence(
+    submission: TriageSubmission, 
+    triage_input: TriageInput,
+    trusted_events: List[CanonicalLogEvent]
+) -> List[EvidenceValidationResult]:
     results = []
     
     # Pre-compute valid IDs
     valid_candidate_ids = {c.evidence_id: c for c in triage_input.candidate_evidence}
-    valid_event_map = {e.event_id: e for e in triage_input.limited_context_events}
+    trusted_event_map = {e.event_id: e for e in trusted_events}
     
     seen_ids = set()
     
@@ -44,7 +50,7 @@ def validate_evidence(submission: TriageSubmission, triage_input: TriageInput) -
         candidate = valid_candidate_ids[ev_id]
         
         # Check scope and canonical store existence
-        if candidate.event_id not in valid_event_map:
+        if candidate.event_id not in trusted_event_map:
             results.append(EvidenceValidationResult(
                 evidence_id=ev_id,
                 event_id=candidate.event_id,
@@ -53,12 +59,12 @@ def validate_evidence(submission: TriageSubmission, triage_input: TriageInput) -
             ))
             continue
             
-        canonical_event = valid_event_map[candidate.event_id]
+        trusted_event = trusted_event_map[candidate.event_id]
         
-        # Validate quote against canonical raw_message (sanitized_message_excerpt in safe view)
+        # Validate quote against canonical raw_message
         if candidate.quote:
             norm_quote = normalize_text(candidate.quote)
-            norm_raw = normalize_text(canonical_event.sanitized_message_excerpt or "")
+            norm_raw = normalize_text(trusted_event.raw_message or "")
             if norm_quote not in norm_raw:
                 results.append(EvidenceValidationResult(
                     evidence_id=ev_id,
@@ -70,16 +76,19 @@ def validate_evidence(submission: TriageSubmission, triage_input: TriageInput) -
                 
         # Validate original_fields parity
         if candidate.original_fields:
-            # We must ensure all fields in candidate exist in the canonical event and match.
-            # However, SafeEventView doesn't have raw original_fields, it has parsed fields.
-            # We match against the properties of SafeEventView
             mismatch = False
+            missing = False
+            original_log = trusted_event.original_log or {}
+            
             for k, v in candidate.original_fields.items():
-                if hasattr(canonical_event, k):
-                    if getattr(canonical_event, k) != v:
-                        mismatch = True
-                        break
-            if mismatch:
+                if k not in original_log:
+                    missing = True
+                    break
+                if original_log[k] != v:
+                    mismatch = True
+                    break
+                    
+            if missing or mismatch:
                 results.append(EvidenceValidationResult(
                     evidence_id=ev_id,
                     event_id=candidate.event_id,
@@ -90,7 +99,7 @@ def validate_evidence(submission: TriageSubmission, triage_input: TriageInput) -
                 
         # Validate source/provenance
         if candidate.source:
-            if candidate.source != canonical_event.source_name and candidate.source != canonical_event.parser_name:
+            if candidate.source != trusted_event.source_name and candidate.source != trusted_event.parser_name:
                 results.append(EvidenceValidationResult(
                     evidence_id=ev_id,
                     event_id=candidate.event_id,

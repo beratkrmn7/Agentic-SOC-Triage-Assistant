@@ -118,8 +118,16 @@ def analyze_incident(req: AnalyzeRequest):
     processed_logs = ingest_pipeline.ingest_records(raw_logs, source_name="mock_api").events
     canonical_events = [log.model_dump(mode="json") for log in processed_logs]
 
+    from agent.models import IncidentBundle
+    bundle = IncidentBundle(
+        incident_id=req.incident_id,
+        incident_type_hint="other",
+        events=processed_logs
+    )
+
     initial_state: IncidentState = {
         "incident_id": req.incident_id,
+        "incident": bundle.model_dump(mode="json"),
         "canonical_events": canonical_events, 
         "messages": [],
         "iteration_count": 0,
@@ -291,6 +299,7 @@ async def analyze_file(file: UploadFile = File(...)):
                     
             initial_state: IncidentState = {
                 "incident_id": inc.incident_id,
+                "incident": inc.model_dump(mode="json"),
                 "canonical_events": canonical_events,
                 "messages": [],
                 "iteration_count": 0,

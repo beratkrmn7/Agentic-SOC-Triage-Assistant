@@ -1,6 +1,7 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, cast
 from agent.models import IncidentBundle
 from agent.triage.models import TriageInput, SafeEventView, EvidenceCandidate
+from agent.config import get_settings
 from agent.schema import CanonicalLogEvent
 import hashlib
 
@@ -15,7 +16,7 @@ def truncate_str(s: str, max_len: int = 500) -> str:
         return s[:max_len] + "... [TRUNCATED]"
     return s
 
-def _build_safe_event(event: CanonicalLogEvent) -> SafeEventView:
+def _build_safe_event(event: CanonicalLogEvent, max_preview_chars: int = 1000) -> SafeEventView:
     return SafeEventView(
         event_id=event.event_id,
         timestamp=event.timestamp.isoformat() if event.timestamp else "",
@@ -32,7 +33,7 @@ def _build_safe_event(event: CanonicalLogEvent) -> SafeEventView:
         tcp_flags=event.tcp_flags,
         parser_name=event.parser_name or "unknown",
         source_name=event.source_name or "unknown",
-        sanitized_message_excerpt=truncate_str(event.raw_message, 1000) if event.raw_message else None
+        sanitized_message_excerpt=truncate_str(event.raw_message, max_preview_chars) if event.raw_message else None
     )
 
 def build_triage_input(
@@ -41,12 +42,17 @@ def build_triage_input(
     candidate_evidence: List[Dict[str, Any]]
 ) -> TriageInput:
     
+    settings = get_settings()
+    max_preview_chars = settings.max_event_preview_chars
+    max_context_events = settings.max_context_events
+    max_candidate_evidence = settings.max_candidate_evidence
+    
     # Sort events deterministically by timestamp then event_id
     sorted_events = sorted(bundle.events, key=lambda e: (e.timestamp or "", e.event_id))
-    safe_events = [_build_safe_event(e) for e in sorted_events]
+    safe_events = [_build_safe_event(e, max_preview_chars) for e in sorted_events]
     
     sorted_context = sorted(bundle.context_events, key=lambda e: (e.timestamp or "", e.event_id))
-    safe_context = [_build_safe_event(e) for e in sorted_context]
+    safe_context = [_build_safe_event(e, max_preview_chars) for e in sorted_context]
     
     signal_summaries = []
     for sig in detected_signals:
@@ -72,7 +78,23 @@ def build_triage_input(
         ))
         
     ev_candidates.sort(key=lambda c: c.evidence_id)
+    ev_candidates = ev_candidates[:max_candidate_evidence]
     
+    limited_events = (safe_events + safe_context)[:max_context_events]
+    
+    mitre_set = set()
+    for sig in detected_signals:
+        if sig.get('mitre_techniques'):
+            mitre_set.add(sig.get('mitre_techniques')[0])
+    
+    p_warns = set()
+    dq_warns = set()
+    for e in bundle.events + bundle.context_events:
+        for w in getattr(e, 'parse_warnings', []):
+            p_warns.add(w)
+        for w in getattr(e, 'data_quality_warnings', []):
+            dq_warns.add(w)
+            
     return TriageInput(
         incident_id=bundle.incident_id,
         incident_type=bundle.incident_type_hint,
@@ -82,12 +104,12 @@ def build_triage_input(
         deterministic_confidence=bundle.confidence_hint or 0.0,
         first_seen=bundle.first_seen.isoformat() if bundle.first_seen else "",
         last_seen=bundle.last_seen.isoformat() if bundle.last_seen else "",
-        primary_entity=bundle.source_ips[0] if bundle.source_ips else "unknown",
+        primary_entity=cast(list, bundle.source_ips)[0] if bundle.source_ips else "unknown",
         target_entities=bundle.destination_ips,
         signal_summaries=signal_summaries,
         candidate_evidence=ev_candidates,
-        limited_context_events=safe_events + safe_context,
-        allowed_mitre_candidates=list(set([sig.get('mitre_techniques', [])[0] for sig in detected_signals if sig.get('mitre_techniques')])),
-        parser_warnings=[],
-        data_quality_warnings=[]
+        limited_context_events=limited_events,
+        allowed_mitre_candidates=sorted(list(mitre_set)),
+        parser_warnings=sorted(list(p_warns)),
+        data_quality_warnings=sorted(list(dq_warns))
     )

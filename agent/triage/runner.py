@@ -29,14 +29,25 @@ class TriageRunner:
         state["safe_triage_input"] = triage_input.model_dump()
         
         # 2. Check Cache
-        if self.cache:
+        import json
+        import hashlib
+        payload = triage_input.model_dump(mode="json")
+        serialized = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        content_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+        if self.settings.triage_cache_enabled and self.cache:
             cache_key = build_cache_key(
                 incident_id=bundle.incident_id,
-                incident_content_hash=str(hash(triage_input.model_dump_json())),
+                incident_content_hash=content_hash,
                 model=self.settings.llm_model,
-                provider="groq",
-                prompt_version=TRIAGE_PROMPT_VERSION,
-                schema_version="1.0"
+                provider=self.settings.llm_provider,
+                prompt_version=self.settings.triage_prompt_version,
+                schema_version=self.settings.triage_schema_version
             )
             state["cache_key"] = cache_key
             cached_result = self.cache.get(cache_key)
@@ -55,12 +66,39 @@ class TriageRunner:
             completed_at=""
         )
 
+        timeout_seconds = self.settings.triage_timeout_seconds
+        deadline = start_time + timeout_seconds
+
         system_prompt = build_system_prompt(triage_input)
+        
+        # Approximate tokens
+        approx_tokens = (len(triage_input.model_dump_json()) + len(system_prompt)) // 4
+        if approx_tokens > self.settings.max_prompt_tokens:
+            from agent.triage.models import TriageSubmission
+            from agent.triage.enums import TriageVerdict, TriageSeverity
+            metrics.review_reason = ReviewReason.PROMPT_BUDGET_EXCEEDED
+            metrics.completed_at = time.time().__str__()
+            metrics.latency_ms = (time.monotonic() - start_time) * 1000.0
+            return TriageRunResult(
+                submission=TriageSubmission(
+                    triage_verdict=TriageVerdict.NEEDS_REVIEW,
+                    incident_type="other",
+                    severity=TriageSeverity.NONE,
+                    confidence_score=0.0,
+                    summary="Prompt budget exceeded before provider call.",
+                    selected_evidence_ids=[],
+                    claims=[]
+                ),
+                review_reason=ReviewReason.PROMPT_BUDGET_EXCEEDED,
+                metrics=metrics
+            )
+
         request = TriageProviderRequest(
             incident_id=bundle.incident_id,
             triage_input=triage_input,
             system_prompt=system_prompt,
-            context={"triage_input": triage_input}
+            context={"triage_input": triage_input},
+            deadline=deadline
         )
         
         # 3. Invoke Provider with global deadline checks
@@ -76,6 +114,9 @@ class TriageRunner:
             metrics.provider_prompt_tokens = response.prompt_tokens
             metrics.provider_completion_tokens = response.completion_tokens
             metrics.total_tokens = response.prompt_tokens + response.completion_tokens
+            metrics.iteration_count = getattr(response, 'iteration_count', 1)
+            metrics.search_call_count = getattr(response, 'search_call_count', 0)
+            metrics.tool_call_count = getattr(response, 'tool_call_count', 0)
             
             # Re-check deadline after invocation
             if time.monotonic() - start_time > timeout_seconds:
@@ -151,7 +192,7 @@ class TriageRunner:
         metrics.latency_ms = (time.monotonic() - start_time) * 1000.0
         
         # 4. Save to cache if valid
-        if self.cache and result.submission and result.review_reason == ReviewReason.NONE:
-            self.cache.set(state["cache_key"], result, ttl_seconds=3600)
+        if self.settings.triage_cache_enabled and self.cache and result.submission and result.review_reason == ReviewReason.NONE:
+            self.cache.set(state["cache_key"], result, ttl_seconds=self.settings.triage_cache_ttl_seconds)
             
         return result

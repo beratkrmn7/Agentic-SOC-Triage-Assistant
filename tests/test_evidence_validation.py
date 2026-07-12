@@ -12,6 +12,12 @@ def test_evidence_validation_success():
             "selected_evidence_ids": ["E1"],
             "claims": []
         },
+        "incident": {
+            "incident_id": "TEST-01",
+            "incident_type_hint": "other",
+            "events": [{"event_id": "1", "timestamp": None, "observed_at": "2024-01-01T00:00:00Z", "parse_status": "success", "parser_name": "test", "source_name": "test", "raw_message": "test", "original_log": {}}],
+            "context_events": []
+        },
         "safe_triage_input": {
             "incident_id": "TEST-01",
             "incident_type": "other",
@@ -50,6 +56,12 @@ def test_evidence_validation_mismatch():
             "selected_evidence_ids": ["E1"],
             "claims": []
         },
+        "incident": {
+            "incident_id": "TEST-01",
+            "incident_type_hint": "other",
+            "events": [{"event_id": "1", "timestamp": None, "observed_at": "2024-01-01T00:00:00Z", "parse_status": "success", "parser_name": "test", "source_name": "test", "raw_message": "test", "original_log": {}}],
+            "context_events": []
+        },
         "safe_triage_input": {
             "incident_id": "TEST-01",
             "incident_type": "other",
@@ -82,6 +94,12 @@ def test_evidence_validation_false_positive_missing_evidence():
             "summary": "test",
             "selected_evidence_ids": [],
             "claims": []
+        },
+        "incident": {
+            "incident_id": "TEST-01",
+            "incident_type_hint": "other",
+            "events": [{"event_id": "1", "timestamp": None, "observed_at": "2024-01-01T00:00:00Z", "parse_status": "success", "parser_name": "test", "source_name": "test", "raw_message": "test", "original_log": {}}],
+            "context_events": []
         },
         "safe_triage_input": {
             "incident_id": "TEST-01",

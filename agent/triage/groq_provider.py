@@ -39,13 +39,16 @@ class GroqTriageProvider(TriageProvider):
             max_retries=0 # Handled by our own retry
         )
         
-    def _invoke_with_circuit_breaker(self, messages: List[Any], tools: List[Any]) -> Any:
+    def _invoke_with_circuit_breaker(self, messages: List[Any], tools: List[Any], timeout: Optional[float] = None) -> Any:
         self.circuit_breaker.check()
         
         def _call():
             try:
                 llm_with_tools = self.llm.bind_tools(tools)
-                return llm_with_tools.invoke(messages)
+                config: Any = {}
+                if timeout is not None:
+                    config["timeout"] = max(0.1, timeout)
+                return llm_with_tools.invoke(messages, config=config)
             except groq.RateLimitError as e:
                 raise ProviderRateLimitError(str(e))
             except groq.APITimeoutError as e:
@@ -58,12 +61,20 @@ class GroqTriageProvider(TriageProvider):
                 raise ProviderUnavailableError(str(e))
                 
         try:
-            res = with_retry(_call, max_retries=2, base_delay=1.0)
+            res = with_retry(
+                _call, 
+                max_retries=self.settings.llm_max_retries, 
+                base_delay=self.settings.llm_retry_base_seconds,
+                max_delay=self.settings.llm_retry_max_seconds
+            )
             self.circuit_breaker.record_success()
             return res
-        except Exception as e:
+        except (ProviderTimeoutError, ProviderRateLimitError, ProviderAuthenticationError, ProviderUnavailableError) as e:
             self.circuit_breaker.record_failure()
             raise e
+        except Exception as e:
+            self.circuit_breaker.record_failure()
+            raise ProviderUnavailableError(str(e))
 
     def invoke(self, request: TriageProviderRequest) -> TriageProviderResponse:
         messages = [
@@ -108,11 +119,18 @@ class GroqTriageProvider(TriageProvider):
         
         total_prompt_tokens = 0
         total_completion_tokens = 0
+        tool_call_count = 0
         
         for iteration in range(self.settings.max_agent_iterations):
             try:
-                ai_message = self._invoke_with_circuit_breaker(messages, tools)
-            except CircuitBreakerOpenError as e:
+                timeout = None
+                if request.deadline:
+                    import time
+                    timeout = request.deadline - time.monotonic()
+                    if timeout <= 0:
+                        raise ProviderTimeoutError("Deadline exceeded before provider call")
+                ai_message = self._invoke_with_circuit_breaker(messages, tools, timeout=timeout)
+            except (CircuitBreakerOpenError, ProviderTimeoutError, ProviderRateLimitError, ProviderAuthenticationError, ProviderConfigurationError) as e:
                 raise e
             except Exception as e:
                 # Wrap any unknown
@@ -138,13 +156,17 @@ class GroqTriageProvider(TriageProvider):
                 raise TriageProviderError("Mixed tool calls", ReviewReason.MIXED_TOOL_CALLS)
                 
             for tool_call in ai_message.tool_calls:
+                tool_call_count += 1
                 if tool_call["name"] == "submit_triage_result":
                     try:
                         submission = TriageSubmission.model_validate(tool_call["args"])
                         return TriageProviderResponse(
                             submission=submission,
                             prompt_tokens=total_prompt_tokens,
-                            completion_tokens=total_completion_tokens
+                            completion_tokens=total_completion_tokens,
+                            iteration_count=iteration + 1,
+                            search_call_count=search_tool.calls,
+                            tool_call_count=tool_call_count
                         )
                     except Exception as e:
                         if iteration == self.settings.max_agent_iterations - 1:
