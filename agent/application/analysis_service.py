@@ -152,8 +152,8 @@ class AnalysisService:
                                 incident_id=incident_id,
                                 triage_run_id=run.id,
                                 event_id=cand.get("event_id"),
-                                quote=cand.get("quote"),
-                                reason=cand.get("reason"),
+                                quote=cand.get("quote")[:5000] if isinstance(cand.get("quote"), str) else str(cand.get("quote") or ""),
+                                reason=cand.get("reason")[:5000] if isinstance(cand.get("reason"), str) else str(cand.get("reason") or ""),
                                 source=cand.get("source"),
                                 validation_status=status,
                                 rejection_reason=rej_reason
@@ -166,7 +166,7 @@ class AnalysisService:
                                 job_id=job.id,
                                 incident_id=incident_id,
                                 triage_run_id=run.id,
-                                content=inc_state.get("final_report"),
+                                content=inc_state.get("final_report", "")[:15000] if isinstance(inc_state.get("final_report"), str) else str(inc_state.get("final_report", "")),
                                 entities=inc_state.get("entities", {}),
                                 recommended_actions=inc_state.get("recommended_actions", []),
                                 mitre_techniques=inc_state.get("mitre_techniques", [])

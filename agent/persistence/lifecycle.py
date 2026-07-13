@@ -19,7 +19,16 @@ class IncidentLifecycle:
     }
 
     @staticmethod
-    def transition(incident: Incident, new_status: str, actor: str = "system", details: Optional[dict] = None) -> Optional[AuditEvent]:
+    def transition(
+        incident: Incident, 
+        new_status: str, 
+        actor: str = "system", 
+        actor_type: Optional[str] = None,
+        actor_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        details: Optional[dict] = None
+    ) -> Optional[AuditEvent]:
+        import uuid
         old_status = str(incident.status)
         
         if old_status == new_status:
@@ -41,11 +50,20 @@ class IncidentLifecycle:
         incident.version = (incident.version or 1) + 1 # type: ignore
         
         audit = AuditEvent(
+            audit_event_id=f"ae_{uuid.uuid4().hex}",
             incident_id=incident.incident_id,
+            event_type="status_transition",
+            entity_type="incident",
+            entity_id=incident.incident_id,
             action="status_change",
             old_status=old_status,
             new_status=new_status,
             actor=actor,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            old_values_json={"status": old_status},
+            new_values_json={"status": new_status},
+            request_id=request_id,
             details=details or {},
             timestamp=datetime.now(timezone.utc)
         )

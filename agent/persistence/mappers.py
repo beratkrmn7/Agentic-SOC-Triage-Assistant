@@ -18,7 +18,7 @@ class DataMapper:
             observed_at=event.observed_at,
             source_line=event.source_line,
             raw_record_hash=event.raw_record_hash,
-            safe_message_excerpt=event.safe_message_excerpt,
+            safe_message_excerpt=event.safe_message_excerpt[:2000] if event.safe_message_excerpt else None,
             parser_version=event.parser_version,
             src_ip=event.src_ip,
             dst_ip=event.dst_ip,

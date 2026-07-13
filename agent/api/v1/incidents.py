@@ -80,12 +80,30 @@ def update_status(incident_id: str, req: StatusUpdateRequest, uow: UnitOfWork = 
         if not incident:
             raise HTTPException(status_code=404, detail="Incident not found")
             
-        if req.expected_version is not None and incident.version != req.expected_version:
-            raise HTTPException(status_code=409, detail=f"Version conflict: expected {req.expected_version}, got {incident.version}")
+        if req.expected_version is None:
+            raise HTTPException(
+                status_code=400, 
+                detail="expected_version is required for status updates"
+            )
+            
+        if incident.version != req.expected_version:
+            raise HTTPException(
+                status_code=409, 
+                detail={
+                    "code": "incident_version_conflict", 
+                    "message": f"Version conflict: expected {req.expected_version}, got {incident.version}"
+                }
+            )
             
         try:
-            IncidentLifecycle.transition(incident, req.status, actor="api_user", details=req.details or {})
-            incident.version += 1
+            IncidentLifecycle.transition(
+                incident, 
+                req.status, 
+                actor="api_user", 
+                actor_type="api_client",
+                actor_id="anonymous_api_client",
+                details=req.details or {}
+            )
             uow.commit()
         except InvalidTransitionError as e:
             raise HTTPException(status_code=409, detail=str(e))
