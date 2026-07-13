@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Depends
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Depends, Header
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -206,17 +206,15 @@ async def ingest_file(file: UploadFile = File(...)):
 
 
 @app.post("/detect/file")
-async def detect_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(get_uow)):
+async def detect_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(get_uow), pipeline_version: str = Header(default="1.0.0", alias="Pipeline-Version")):
     """
-    Analyze a raw JSONL log file, performing full ingestion, filtering, and Phase 3 DetectionEngine logic.
-    Returns signals and incidents without invoking the LLM triage graph.
+    Ingest a raw JSONL log file, parse it into Canonical Events, and return Detection Signals.
     """
     from agent.application.analysis_service import AnalysisService
     from agent.application.errors import DuplicateAnalysisError
     temp_path = await secure_save_upload(file)
         
     try:
-        pipeline_version = "1.0.0"
         analysis_mode = "detect"
         file_sha256 = calculate_file_sha256(temp_path)
         idempotency_key = f"{file_sha256}:{pipeline_version}:{analysis_mode}"
@@ -299,7 +297,7 @@ async def detect_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(ge
             os.remove(temp_path)
 
 @app.post("/analyze/file")
-async def analyze_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(get_uow)):
+async def analyze_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(get_uow), pipeline_version: str = Header(default="1.0.0", alias="Pipeline-Version")):
     """
     Analyze a raw JSONL log file, performing full ingestion, filtering, correlation, and LLM triage.
     """
@@ -308,7 +306,6 @@ async def analyze_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(g
     temp_path = await secure_save_upload(file)
         
     try:
-        pipeline_version = "1.0.0"
         analysis_mode = "analyze"
         file_sha256 = calculate_file_sha256(temp_path)
         idempotency_key = f"{file_sha256}:{pipeline_version}:{analysis_mode}"
