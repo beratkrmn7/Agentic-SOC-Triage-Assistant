@@ -17,7 +17,7 @@ class DummyParser2(BaseLogParser):
     def match(cls, raw, ctx): return ParserMatch(matched=True, confidence=0.88, reason="")
     def parse(self, raw, ctx, evt): return None
 
-from unittest.mock import patch
+from unittest.mock import patch  # noqa: E402
 
 @patch("agent.parsers.registry.logger")
 def test_parser_ambiguity(mock_logger):

@@ -16,14 +16,14 @@ def calculate_file_sha256(filepath: str) -> str:
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
 
-from agent.config import get_settings
-from agent.errors import InputTooLargeError, UnsupportedInputFormatError, InvalidEncodingError
-from agent.graph import app as agent_app
-from agent.ingestion.pipeline import IngestionPipeline
-from agent.models import IncidentState
-from agent.api.v1.incidents import router as v1_incidents_router
-from agent.api.deps import get_uow
-from agent.persistence.unit_of_work import UnitOfWork
+from agent.config import get_settings  # noqa: E402
+from agent.errors import InputTooLargeError, UnsupportedInputFormatError, InvalidEncodingError  # noqa: E402
+from agent.graph import app as agent_app  # noqa: E402
+from agent.ingestion.pipeline import IngestionPipeline  # noqa: E402
+from agent.models import IncidentState  # noqa: E402
+from agent.api.v1.incidents import router as v1_incidents_router  # noqa: E402
+from agent.api.deps import get_uow  # noqa: E402
+from agent.persistence.unit_of_work import UnitOfWork  # noqa: E402
 
 app = FastAPI(
     title="Agentic SOC Triage Assistant",

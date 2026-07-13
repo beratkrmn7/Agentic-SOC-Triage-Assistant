@@ -64,13 +64,25 @@ class AnalysisService:
             
             # 2. Canonical Events
             for event in result.event_map.values():
-                orm_event = DataMapper.domain_event_to_orm(event, job_id=job_id)
-                uow.canonical_events.add(orm_event)
+                orm_event = DataMapper.domain_event_to_orm(event)
+                existing_event = uow.canonical_events.get(orm_event.event_id)
+                if not existing_event:
+                    uow.canonical_events.add(orm_event)
+                    job.events.append(orm_event)
+                else:
+                    if existing_event not in job.events:
+                        job.events.append(existing_event)
                 
             # 3. Detection Signals
             for signal in result.detection_result.signals:
                 orm_signal = DataMapper.domain_signal_to_orm(signal)
-                uow.detection_signals.add(orm_signal)
+                existing_signal = uow.detection_signals.get(orm_signal.signal_id)
+                if not existing_signal:
+                    uow.detection_signals.add(orm_signal)
+                    job.signals.append(orm_signal)
+                else:
+                    if existing_signal not in job.signals:
+                        job.signals.append(existing_signal)
                 
             # 4. Incidents
             for inc in result.detection_result.incidents:
@@ -80,7 +92,11 @@ class AnalysisService:
                 existing = uow.incidents.get(orm_inc.incident_id)
                 if not existing:
                     uow.incidents.add(orm_inc)
+                    job.incidents.append(orm_inc)
                     IncidentLifecycle.transition(orm_inc, "new", actor="detection_engine")
+                else:
+                    if existing not in job.incidents:
+                        job.incidents.append(existing)
             
             uow.session.flush() # Flush to get incident IDs ready for triage references
             
@@ -99,6 +115,7 @@ class AnalysisService:
                         
                         run = TriageRun(
                             triage_run_id=str(uuid.uuid4()),
+                            job_id=job.id,
                             incident_id=incident_id,
                             verdict=verdict,
                             severity=inc_state.get("severity"),
@@ -110,22 +127,42 @@ class AnalysisService:
                         uow.triage_runs.add(run)
                         uow.session.flush()
                         
-                        for ev in inc_state.get("validated_evidence", []):
+                        # Process Evidence from safe_triage_input which has full candidate records
+                        triage_input = inc_state.get("safe_triage_input", {})
+                        candidates = triage_input.get("candidate_evidence", [])
+                        
+                        valid_map = {e["evidence_id"]: e for e in inc_state.get("validated_evidence", [])}
+                        reject_map = {e["evidence_id"]: e for e in inc_state.get("rejected_evidence", [])}
+                        
+                        for cand in candidates:
+                            ev_id = cand.get("evidence_id")
+                            status = "candidate"
+                            rej_reason = None
+                            
+                            if ev_id in valid_map:
+                                status = "validated"
+                            elif ev_id in reject_map:
+                                status = "rejected"
+                                rej_reason = reject_map[ev_id].get("rejection_reason")
+                                
                             evidence = EvidenceItem(
-                                evidence_id=str(uuid.uuid4()),
+                                evidence_id=ev_id or str(uuid.uuid4()),
+                                job_id=job.id,
                                 incident_id=incident_id,
                                 triage_run_id=run.id,
-                                event_id=ev.get("event_id"),
-                                quote=ev.get("quote"),
-                                reason=ev.get("reason"),
-                                source=ev.get("source"),
-                                validation_status="validated"
+                                event_id=cand.get("event_id"),
+                                quote=cand.get("quote"),
+                                reason=cand.get("reason"),
+                                source=cand.get("source"),
+                                validation_status=status,
+                                rejection_reason=rej_reason
                             )
                             uow.evidence.add(evidence)
                             
                         if inc_state.get("final_report"):
                             report = Report(
                                 report_id=str(uuid.uuid4()),
+                                job_id=job.id,
                                 incident_id=incident_id,
                                 triage_run_id=run.id,
                                 content=inc_state.get("final_report"),
@@ -177,26 +214,40 @@ class AnalysisService:
                             signal_map={},
                             incidents=[]
                         )
-                        # We don't reconstruct everything perfectly, but we reconstruct the required IncidentStates
+                        # We fully reconstruct everything from the DB
                         from agent.detection.models import DetectionResult
                         from agent.detection.models import DetectionMetrics
+                        
+                        # Reconstruct Events
+                        for ev in job.events:
+                            domain_ev = DataMapper.orm_to_domain_event(ev)
+                            result.event_map[domain_ev.event_id] = domain_ev
+                            
+                        # Reconstruct Signals
                         result.detection_result = DetectionResult(
                             signals=[], 
                             incidents=[], 
                             suppressed_signals=[], 
                             uncorrelated_event_ids=[], 
                             warnings=[], 
-                            metrics=DetectionMetrics(total_signals=0, critical_signals=0, high_signals=0, duration_ms=0)
+                            metrics=DetectionMetrics(
+                                signal_count=len(job.signals), 
+                                duration_ms=0.0
+                            )
                         )
-                        
                         for sig in job.signals:
                             domain_sig = DataMapper.orm_to_domain_signal(sig)
                             result.detection_result.signals.append(domain_sig)
+                            result.signal_map[domain_sig.signal_id] = domain_sig
+                            
+                        # Reconstruct Incidents
                         for inc in job.incidents:
                             domain_inc = DataMapper.orm_to_domain_incident(inc)
                             result.detection_result.incidents.append(domain_inc)
                             
-                            state = {"incident_id": inc.incident_id, "incident": domain_inc.model_dump(mode="json")}
+                            # Use the same exact builder logic to hydrate state
+                            state = self._build_initial_state(domain_inc, result.event_map, result.signal_map)
+                            
                             triage_runs = [tr for tr in job.triage_runs if tr.incident_id == inc.incident_id]
                             if triage_runs:
                                 last_run = sorted(triage_runs, key=lambda r: r.started_at, reverse=True)[0]
@@ -204,10 +255,22 @@ class AnalysisService:
                                 state["incident_type"] = last_run.incident_type
                                 state["severity"] = last_run.severity
                                 state["confidence_score"] = last_run.confidence_score
+                                state["iteration_count"] = last_run.iteration_count
                                 
                                 reports = [rp for rp in job.reports if rp.triage_run_id == last_run.id]
                                 if reports:
                                     state["final_report"] = reports[0].content
+                                    
+                                # Hydrate Evidence
+                                run_evidence = [ev for ev in job.evidence_items if ev.triage_run_id == last_run.id]
+                                if run_evidence:
+                                    state["validated_evidence"] = [{
+                                        "event_id": ev.event_id,
+                                        "quote": ev.quote,
+                                        "reason": ev.reason,
+                                        "source": ev.source
+                                    } for ev in run_evidence]
+                                    
                             result.incidents.append(state)
                             
                         return result
@@ -312,7 +375,11 @@ class AnalysisService:
                         job = uow.session.query(IngestionJob).get(result.job_id)
                         if job:
                             job.status = "failed"
-                            job.error_code = str(e)
+                            # Determine machine-readable error code
+                            if "IntegrityError" in str(type(e)):
+                                job.error_code = "PERSISTENCE_INTEGRITY_ERROR"
+                            else:
+                                job.error_code = "INTERNAL_ANALYSIS_ERROR"
                             uow.session.commit()
                 raise
                 

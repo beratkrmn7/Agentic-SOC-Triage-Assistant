@@ -19,7 +19,7 @@ class IncidentResponse(BaseModel):
 
 class StatusUpdateRequest(BaseModel):
     status: str
-    actor: str = "api_user"
+    expected_version: Optional[int] = None
     details: Optional[dict] = None
 
 @router.get("/", response_model=List[IncidentResponse])
@@ -72,15 +72,24 @@ def get_incident(incident_id: str, uow: UnitOfWork = Depends(get_uow)):
 
 @router.patch("/{incident_id}/status")
 def update_status(incident_id: str, req: StatusUpdateRequest, uow: UnitOfWork = Depends(get_uow)):
+    from agent.application.errors import InvalidTransitionError
+    
     with uow:
         incident = uow.incidents.get(incident_id)
         if not incident:
             raise HTTPException(status_code=404, detail="Incident not found")
             
-        IncidentLifecycle.transition(incident, req.status, actor=req.actor, details=req.details)
-        uow.commit()
+        if req.expected_version is not None and incident.version != req.expected_version:
+            raise HTTPException(status_code=409, detail=f"Version conflict: expected {req.expected_version}, got {incident.version}")
             
-        return {"status": "success", "new_status": incident.status}
+        try:
+            IncidentLifecycle.transition(incident, req.status, actor="api_user", details=req.details)
+            incident.version += 1
+            uow.commit()
+        except InvalidTransitionError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+            
+        return {"status": "success", "new_status": incident.status, "version": incident.version}
 
 @router.get("/{incident_id}/signals")
 def get_signals(incident_id: str, uow: UnitOfWork = Depends(get_uow)):

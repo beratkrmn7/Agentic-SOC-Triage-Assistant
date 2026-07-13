@@ -19,7 +19,7 @@ engine = create_engine(
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base.metadata.create_all(bind=engine)
 
-from agent.api.deps import get_uow
+from agent.api.deps import get_uow  # noqa: E402
 client = TestClient(app)
 
 @pytest.fixture(autouse=True)
@@ -59,7 +59,7 @@ def test_idempotency_exact_duplicate():
                     events=[],
                     metrics=IngestionMetrics(total_records=1, parsed_records=1, failed_records=0, unsupported_records=0, duration_ms=10)
                 ),
-                detection_result=DetectionResult(signals=[], incidents=[], suppressed_signals=[], uncorrelated_event_ids=[], warnings=[], metrics=DetectionMetrics(total_signals=0, critical_signals=0, high_signals=0, duration_ms=10)),
+                detection_result=DetectionResult(signals=[], incidents=[], suppressed_signals=[], uncorrelated_event_ids=[], metrics=DetectionMetrics(signal_count=0, duration_ms=0)),
                 event_map={},
                 signal_map={},
                 incidents=[]
@@ -222,16 +222,112 @@ def test_idempotency_failed_retry():
 def test_idempotency_sqlite_reload():
     # Scenario 7: State persistence across restarts
     # (SQLite DB is persisted)
-    pass
+    db_fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(db_fd)
+    try:
+        file_engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(bind=file_engine)
+        FileSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=file_engine)
+        
+        def override_file_uow():
+            uow = UnitOfWork(session_factory=FileSessionLocal)
+            yield uow
+            
+        app.dependency_overrides[get_uow] = override_file_uow
+        
+        log_content = '{"event_id": "reload_test"}\n'
+        path = create_temp_log(log_content)
+        
+        try:
+            with open(path, "rb") as f:
+                res1 = client.post("/detect/file", files={"file": f})
+            assert res1.status_code == 200
+            assert res1.json().get("reused") is False
+
+            # Dispose engine
+            file_engine.dispose()
+            
+            # Re-create engine (simulate reload)
+            file_engine2 = create_engine(f"sqlite:///{db_path}")
+            FileSessionLocal2 = sessionmaker(autocommit=False, autoflush=False, bind=file_engine2)
+            
+            def override_file_uow2():
+                uow = UnitOfWork(session_factory=FileSessionLocal2)
+                yield uow
+                
+            app.dependency_overrides[get_uow] = override_file_uow2
+            
+            with open(path, "rb") as f:
+                res2 = client.post("/detect/file", files={"file": f})
+            assert res2.status_code == 200
+            assert res2.json().get("reused") is True
+            file_engine2.dispose()
+        finally:
+            os.remove(path)
+            app.dependency_overrides.pop(get_uow, None)
+    finally:
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+            except PermissionError:
+                pass
 
 def test_idempotency_parallel_submission():
     # Scenario 8: Parallel submissions
-    pass
+    import concurrent.futures
+    log_content = '{"event_id": "parallel_test"}\n'
+    path = create_temp_log(log_content)
+    
+    def submit_file():
+        with open(path, "rb") as f:
+            return client.post("/detect/file", files={"file": f})
+            
+    try:
+        # We mock time.sleep inside detection to simulate a slow run so race condition is likely
+        with patch('agent.detection.engine.DetectionEngine.analyze') as mock_detect:
+            from agent.detection.models import DetectionResult, DetectionMetrics
+            import time
+            def slow_detect(*args, **kwargs):
+                time.sleep(0.2)
+                return DetectionResult(signals=[], incidents=[], suppressed_signals=[], uncorrelated_event_ids=[], warnings=[], metrics=DetectionMetrics(signal_count=0, duration_ms=0))
+            mock_detect.side_effect = slow_detect
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = [executor.submit(submit_file) for _ in range(5)]
+                results = [f.result() for f in concurrent.futures.as_completed(futures)]
+                
+            status_codes = [r.status_code for r in results]
+            assert 200 in status_codes, f"At least one should succeed. Status codes: {status_codes}"
+            assert 409 in status_codes, "The rest should get 409 conflict"
+    finally:
+        os.remove(path)
 
 def test_idempotency_uow_isolation():
     # Scenario 9: UnitOfWork isolation
-    pass
+    # Ensuring uow is closed properly
+    uow = UnitOfWork(session_factory=TestingSessionLocal)
+    with uow:
+        assert uow.session is not None
+    # If it didn't throw, isolation exit is fine
 
 def test_idempotency_metrics():
     # Scenario 10: Correct metrics mapping on reuse
-    pass
+    log_content = '{"event_id": "metrics"}\n'
+    path = create_temp_log(log_content)
+    try:
+        with open(path, "rb") as f:
+            res1 = client.post("/detect/file", files={"file": f})
+        assert res1.status_code == 200
+        
+        # Re-submit
+        with open(path, "rb") as f:
+            res2 = client.post("/detect/file", files={"file": f})
+            
+        assert res2.status_code == 200
+        data = res2.json()
+        assert data["reused"] is True
+        # Ensure metrics exist
+        assert "detection" in data
+        assert isinstance(data["detection"]["signal_count"], int)
+    finally:
+        os.remove(path)

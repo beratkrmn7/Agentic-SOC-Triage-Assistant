@@ -1,7 +1,28 @@
-from sqlalchemy import Column, String, Integer, Float, DateTime, Boolean, JSON, ForeignKey
+from sqlalchemy import Column, String, Integer, Float, DateTime, Boolean, JSON, ForeignKey, Table, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from agent.persistence.database import Base
+
+ingestion_job_events = Table(
+    "ingestion_job_events",
+    Base.metadata,
+    Column("job_id", String, ForeignKey("ingestion_jobs.id"), primary_key=True),
+    Column("event_id", String, ForeignKey("canonical_events.event_id"), primary_key=True)
+)
+
+ingestion_job_signals = Table(
+    "ingestion_job_signals",
+    Base.metadata,
+    Column("job_id", String, ForeignKey("ingestion_jobs.id"), primary_key=True),
+    Column("signal_id", String, ForeignKey("detection_signals.signal_id"), primary_key=True)
+)
+
+ingestion_job_incidents = Table(
+    "ingestion_job_incidents",
+    Base.metadata,
+    Column("job_id", String, ForeignKey("ingestion_jobs.id"), primary_key=True),
+    Column("incident_id", String, ForeignKey("incidents.incident_id"), primary_key=True)
+)
 
 class IngestionJob(Base):
     __tablename__ = "ingestion_jobs"
@@ -33,18 +54,19 @@ class IngestionJob(Base):
     parser_counts = Column(JSON, default=dict)
     error_counts = Column(JSON, default=dict)
     
-    events = relationship("CanonicalEvent", backref="job", cascade="all, delete-orphan")
-    signals = relationship("DetectionSignal", backref="job", cascade="all, delete-orphan")
-    incidents = relationship("Incident", backref="job", cascade="all, delete-orphan")
-    triage_runs = relationship("TriageRun", backref="job", cascade="all, delete-orphan")
-    reports = relationship("Report", backref="job", cascade="all, delete-orphan")
-    evidence_items = relationship("EvidenceItem", backref="job", cascade="all, delete-orphan")
+    events = relationship("CanonicalEvent", secondary=ingestion_job_events, back_populates="jobs")
+    signals = relationship("DetectionSignal", secondary=ingestion_job_signals, back_populates="jobs")
+    incidents = relationship("Incident", secondary=ingestion_job_incidents, back_populates="jobs")
+    triage_runs = relationship("TriageRun", back_populates="job", cascade="all, delete-orphan")
+    reports = relationship("Report", back_populates="job", cascade="all, delete-orphan")
+    evidence_items = relationship("EvidenceItem", back_populates="job", cascade="all, delete-orphan")
 
 class CanonicalEvent(Base):
     __tablename__ = "canonical_events"
     
     event_id = Column(String, primary_key=True)
-    job_id = Column(String, ForeignKey("ingestion_jobs.id"), nullable=True, index=True)
+    job_id = Column(String, nullable=True, index=True) # Will be dropped in migration backfill
+    jobs = relationship("IngestionJob", secondary=ingestion_job_events, back_populates="events")
     source_name = Column(String, index=True)
     parser_name = Column(String)
     parser_version = Column(String, nullable=True)
@@ -68,7 +90,8 @@ class DetectionSignal(Base):
     __tablename__ = "detection_signals"
     
     signal_id = Column(String, primary_key=True)
-    job_id = Column(String, ForeignKey("ingestion_jobs.id"), nullable=True, index=True)
+    job_id = Column(String, nullable=True, index=True) # Will be dropped in migration backfill
+    jobs = relationship("IngestionJob", secondary=ingestion_job_signals, back_populates="signals")
     rule_id = Column(String, index=True)
     rule_name = Column(String)
     rule_version = Column(String, nullable=True)
@@ -95,7 +118,8 @@ class Incident(Base):
     __tablename__ = "incidents"
     
     incident_id = Column(String, primary_key=True)
-    job_id = Column(String, ForeignKey("ingestion_jobs.id"), nullable=True, index=True)
+    job_id = Column(String, nullable=True, index=True) # Will be dropped in migration backfill
+    jobs = relationship("IngestionJob", secondary=ingestion_job_incidents, back_populates="incidents")
     title = Column(String)
     incident_type = Column(String)
     incident_family = Column(String)
@@ -124,8 +148,6 @@ class Incident(Base):
     reports = relationship("Report", back_populates="incident", cascade="all, delete-orphan")
     audit_events = relationship("AuditEvent", back_populates="incident", cascade="all, delete-orphan")
 
-from sqlalchemy import UniqueConstraint
-
 class IncidentEvent(Base):
     __tablename__ = "incident_events"
     __table_args__ = (UniqueConstraint('incident_id', 'event_id', name='uq_incident_event'),)
@@ -153,6 +175,7 @@ class TriageRun(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     triage_run_id = Column(String, nullable=True, unique=True, index=True)
     job_id = Column(String, ForeignKey("ingestion_jobs.id"), nullable=True, index=True)
+    job = relationship("IngestionJob", back_populates="triage_runs")
     incident_id = Column(String, ForeignKey("incidents.incident_id"), index=True)
     started_at = Column(DateTime(timezone=True), default=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)
@@ -192,6 +215,7 @@ class EvidenceItem(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     evidence_id = Column(String, nullable=True, unique=True, index=True)
     job_id = Column(String, ForeignKey("ingestion_jobs.id"), nullable=True, index=True)
+    job = relationship("IngestionJob", back_populates="evidence_items")
     incident_id = Column(String, ForeignKey("incidents.incident_id"), nullable=True, index=True)
     triage_run_id = Column(Integer, ForeignKey("triage_runs.id"), index=True)
     
@@ -214,6 +238,7 @@ class Report(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     report_id = Column(String, nullable=True, unique=True, index=True)
     job_id = Column(String, ForeignKey("ingestion_jobs.id"), nullable=True, index=True)
+    job = relationship("IngestionJob", back_populates="reports")
     incident_id = Column(String, ForeignKey("incidents.incident_id"), index=True)
     triage_run_id = Column(Integer, ForeignKey("triage_runs.id"), nullable=True)
     generated_at = Column(DateTime(timezone=True), default=func.now())

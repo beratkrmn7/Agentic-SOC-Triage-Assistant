@@ -4,10 +4,10 @@ from agent.config import get_settings
 
 settings = get_settings()
 
-from typing import Iterator
-from sqlalchemy import Engine
-from sqlalchemy.orm import Session
-from agent.config import Settings
+from typing import Iterator  # noqa: E402
+from sqlalchemy import Engine  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
+from agent.config import Settings  # noqa: E402
 
 Base = declarative_base()
 

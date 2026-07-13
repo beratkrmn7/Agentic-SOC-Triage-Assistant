@@ -8,10 +8,9 @@ from agent.detection.models import IncidentBundle
 
 class DataMapper:
     @staticmethod
-    def domain_event_to_orm(event: CanonicalLogEvent, job_id: str = None) -> CanonicalEvent:
+    def domain_event_to_orm(event: CanonicalLogEvent) -> CanonicalEvent:
         return CanonicalEvent(
             event_id=event.event_id,
-            job_id=job_id,
             source_name=event.source_name,
             parser_name=event.parser_name,
             timestamp=event.timestamp,
@@ -51,10 +50,9 @@ class DataMapper:
         )
 
     @staticmethod
-    def domain_signal_to_orm(signal: DomainDetectionSignal, job_id: str = None) -> DetectionSignal:
+    def domain_signal_to_orm(signal: DomainDetectionSignal) -> DetectionSignal:
         return DetectionSignal(
             signal_id=signal.signal_id,
-            job_id=job_id,
             rule_id=signal.rule_id,
             rule_name=signal.rule_name,
             rule_version=getattr(signal, 'rule_version', None),
@@ -94,10 +92,9 @@ class DataMapper:
         )
 
     @staticmethod
-    def domain_incident_to_orm(bundle: IncidentBundle, job_id: str = None) -> Incident:
+    def domain_incident_to_orm(bundle: IncidentBundle) -> Incident:
         inc = Incident(
             incident_id=bundle.incident_id,
-            job_id=job_id,
             title=bundle.title,
             incident_type=bundle.incident_type,
             incident_family=bundle.incident_family,
