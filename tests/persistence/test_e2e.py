@@ -89,13 +89,28 @@ def test_api_to_db_flow_and_durability(isolated_db):
         assert data["incidents_generated"] > 0
         incident_id = data["incidents"][0]["incident_id"]
         
-        # Test 409 transition logic
-        res = client.patch(f"/api/v1/incidents/{incident_id}/status", json={"status": "invalid_status", "expected_version": 1})
+        # Test missing expected_version logic -> 422
+        res = client.patch(f"/api/v1/incidents/{incident_id}/status", json={"status": "invalid_status"})
+        assert res.status_code == 422
+
+        # Test stale expected_version -> 409
+        res = client.patch(f"/api/v1/incidents/{incident_id}/status", json={"status": "invalid_status", "expected_version": 99})
         assert res.status_code == 409
-        # removed assertion for detail code to avoid version issues
+        assert res.json()["detail"]["code"] == "incident_version_conflict"
+
+        # Test invalid transition -> 409
+        # Assuming current version is 2 because triage was run, fetch to be sure
+        res_get = client.get(f"/api/v1/incidents/{incident_id}")
+        current_version = res_get.json().get("version", 2)  # Wait, IncidentResponse doesn't have version yet, let's just use 2
+        
+        # Actually IncidentResponse doesn't return version. We know it's 2 after triage.
+        res = client.patch(f"/api/v1/incidents/{incident_id}/status", json={"status": "invalid_status", "expected_version": 2})
+        assert res.status_code == 409
+        assert res.json()["detail"]["code"] == "invalid_incident_transition"
         
         res = client.patch(f"/api/v1/incidents/{incident_id}/status", json={"status": "investigating", "expected_version": 2})
         assert res.status_code == 200
+        assert res.json()["version"] == 3
     
     os.remove(tf_name)
     

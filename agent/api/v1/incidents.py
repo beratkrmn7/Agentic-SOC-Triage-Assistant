@@ -19,7 +19,7 @@ class IncidentResponse(BaseModel):
 
 class StatusUpdateRequest(BaseModel):
     status: str
-    expected_version: Optional[int] = None
+    expected_version: int
     details: Optional[dict] = None
 
 @router.get("/", response_model=List[IncidentResponse])
@@ -80,12 +80,6 @@ def update_status(incident_id: str, req: StatusUpdateRequest, uow: UnitOfWork = 
         if not incident:
             raise HTTPException(status_code=404, detail="Incident not found")
             
-        if req.expected_version is None:
-            raise HTTPException(
-                status_code=400, 
-                detail="expected_version is required for status updates"
-            )
-            
         if incident.version != req.expected_version:
             raise HTTPException(
                 status_code=409, 
@@ -99,14 +93,13 @@ def update_status(incident_id: str, req: StatusUpdateRequest, uow: UnitOfWork = 
             IncidentLifecycle.transition(
                 incident, 
                 req.status, 
-                actor="api_user", 
                 actor_type="api_client",
                 actor_id="anonymous_api_client",
                 details=req.details or {}
             )
             uow.commit()
         except InvalidTransitionError as e:
-            raise HTTPException(status_code=409, detail=str(e))
+            raise HTTPException(status_code=409, detail={"code": "invalid_incident_transition", "message": str(e)})
             
         return {"status": "success", "new_status": incident.status, "version": incident.version}
 
@@ -159,7 +152,9 @@ def get_evidence(incident_id: str, uow: UnitOfWork = Depends(get_uow)):
                     "triage_run_id": run.triage_run_id,
                     "event_id": ev.event_id,
                     "quote": ev.quote,
-                    "reason": ev.reason
+                    "reason": ev.reason,
+                    "validation_status": ev.validation_status,
+                    "rejection_reason": ev.rejection_reason
                 })
         return evidence_list
 
@@ -174,12 +169,25 @@ def get_report(incident_id: str, uow: UnitOfWork = Depends(get_uow)):
             raise HTTPException(status_code=404, detail="Report not generated yet")
             
         report = incident.reports[-1] # Get latest
+        
+        validated_ev = []
+        for run in incident.triage_runs:
+            for ev in run.evidence_items:
+                if ev.validation_status == "valid":
+                    validated_ev.append({
+                        "evidence_id": ev.evidence_id,
+                        "event_id": ev.event_id,
+                        "quote": ev.quote,
+                        "reason": ev.reason
+                    })
+
         return {
             "incident_id": incident_id,
             "report_id": report.report_id,
             "format": report.format,
             "content": report.content,
-            "generated_at": report.generated_at
+            "generated_at": report.generated_at,
+            "validated_evidence": validated_ev
         }
         
 @router.get("/{incident_id}/timeline")

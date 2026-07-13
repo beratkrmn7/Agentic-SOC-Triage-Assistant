@@ -105,6 +105,8 @@ class IncidentState(TypedDict, total=False):
     # Phase 4 Submission state
     triage_submission: NotRequired[dict]
     triage_verdict: NotRequired[str]
+    report_content_sha256: NotRequired[str]
+    recommendations: NotRequired[list]
     incident_type: NotRequired[str]
     severity: NotRequired[str]
     confidence_score: NotRequired[float]

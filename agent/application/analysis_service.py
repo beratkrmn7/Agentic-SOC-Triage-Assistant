@@ -1,3 +1,4 @@
+import logging
 from typing import Optional, List, Dict, Any, cast
 from agent.persistence.unit_of_work import UnitOfWork
 from agent.application.models import AnalysisResult
@@ -8,6 +9,7 @@ from agent.detection.engine import DetectionEngine
 from agent.models import IncidentState
 from agent.graph import app
 import traceback
+logger = logging.getLogger(__name__)
 from sqlalchemy.sql import func
 
 class AnalysisService:
@@ -23,7 +25,7 @@ class AnalysisService:
         from agent.persistence.orm_models import IngestionJob, TriageRun, EvidenceItem, Report
         import uuid
         
-        with cast(UnitOfWork, self.uow) as uow: # type: ignore
+        with cast(UnitOfWork, self.uow) as uow:
             # 1. Ingestion Job
             # Check if job_id is already assigned (from idempotency flow)
             job_id = result.job_id
@@ -75,6 +77,7 @@ class AnalysisService:
                         job.events.append(existing_event)
                 
             # 3. Detection Signals
+            assert result.detection_result is not None
             for signal in result.detection_result.signals:
                 orm_signal = DataMapper.domain_signal_to_orm(signal)
                 existing_signal = uow.detection_signals.get(orm_signal.signal_id)
@@ -86,6 +89,7 @@ class AnalysisService:
                         job.signals.append(existing_signal)
                 
             # 4. Incidents
+            assert result.detection_result is not None
             for inc in result.detection_result.incidents:
                 orm_inc = DataMapper.domain_incident_to_orm(inc)
                 
@@ -111,8 +115,14 @@ class AnalysisService:
                     orm_inc = uow.incidents.get(incident_id)
                     if orm_inc:
                         verdict = inc_state.get("triage_verdict")
-                        new_status = "triaged" if verdict else "investigating"
-                        IncidentLifecycle.transition(orm_inc, new_status, actor="triage_agent", details={"verdict": verdict})
+                        new_status = "triaged" if verdict else "needs_review"
+                        IncidentLifecycle.transition(
+                            orm_inc, 
+                            new_status, 
+                            actor_type="triage_agent", 
+                            actor_id="system", 
+                            details={"verdict": verdict}
+                        )
                         
                         run = TriageRun(
                             triage_run_id=str(uuid.uuid4()),
@@ -187,7 +197,7 @@ class AnalysisService:
         job_id = None
         
         if self.uow and idempotency_key:
-            with cast(UnitOfWork, self.uow) as uow: # type: ignore
+            with cast(UnitOfWork, self.uow) as uow:
                 job = uow.session.query(IngestionJob).filter_by(idempotency_key=idempotency_key).first()
                 if job:
                     if job.status == "processing":
@@ -205,12 +215,34 @@ class AnalysisService:
                         job.last_requested_at = func.now()
                         uow.session.commit()
                         
+                        # Hydrate Ingestion Result
+                        from agent.ingestion.models import IngestionResult, IngestionMetrics, InputFormat
+                        ingestion_metrics = IngestionMetrics(
+                            total_records=job.total_records,
+                            parsed_records=job.parsed_records,
+                            failed_records=job.failed_records,
+                            unsupported_records=job.unsupported_records,
+                            semantically_invalid_records=0,  # Or add to db if needed
+                            skipped_records=0,
+                            bytes_read=0,
+                            duration_ms=job.duration_ms,
+                            parser_counts=job.parser_counts or {},
+                            error_counts=job.error_counts or {}
+                        )
+                        ingestion_result = IngestionResult(
+                            source_name=job.source_name,
+                            input_format=InputFormat(job.input_format) if job.input_format else InputFormat.UNKNOWN,
+                            events=[],
+                            metrics=ingestion_metrics
+                        )
+
                         # Build AnalysisResult from DB
                         result = AnalysisResult(
                             source_name=job.source_name,
                             job_id=job.id,
                             reused=True,
                             idempotency_status="reused_completed_result",
+                            ingestion_result=ingestion_result,
                             event_map={},
                             signal_map={},
                             incidents=[]
@@ -261,16 +293,33 @@ class AnalysisService:
                                 reports = [rp for rp in job.reports if rp.triage_run_id == last_run.id]
                                 if reports:
                                     state["final_report"] = reports[0].content
+                                    state["report_content_sha256"] = reports[0].content_sha256
+                                    if reports[0].entities:
+                                        state["mitre_techniques"] = reports[0].entities.get("mitre_tactics", [])
+                                        state["recommendations"] = reports[0].entities.get("recommendations", [])
                                     
                                 # Hydrate Evidence
                                 run_evidence = [ev for ev in job.evidence_items if ev.triage_run_id == last_run.id]
                                 if run_evidence:
-                                    state["validated_evidence"] = [{
-                                        "event_id": ev.event_id,
-                                        "quote": ev.quote,
-                                        "reason": ev.reason,
-                                        "source": ev.source
-                                    } for ev in run_evidence]
+                                    state["candidate_evidence"] = []
+                                    state["validated_evidence"] = []
+                                    state["rejected_evidence"] = []
+                                    for ev in run_evidence:
+                                        ev_dict = {
+                                            "evidence_id": ev.evidence_id,
+                                            "event_id": ev.event_id,
+                                            "quote": ev.quote,
+                                            "reason": ev.reason,
+                                            "source": ev.source,
+                                            "validation_status": ev.validation_status,
+                                            "rejection_reason": ev.rejection_reason
+                                        }
+                                        if ev.validation_status == "valid":
+                                            state["validated_evidence"].append(ev_dict)
+                                        elif ev.validation_status == "rejected":
+                                            state["rejected_evidence"].append(ev_dict)
+                                        else:
+                                            state["candidate_evidence"].append(ev_dict)
                                     
                             result.incidents.append(state)
                             
@@ -356,10 +405,9 @@ class AnalysisService:
             if run_triage:
                 try:
                     final_state = app.invoke(initial_state)
-                    result.incidents.append(final_state)
+                    result.incidents.append(final_state)  # type: ignore
                 except Exception as e:
-                    print(f"Error during triage: {e}")
-                    traceback.print_exc()
+                    logger.error(f"Error during triage", exc_info=False, extra={"error": str(e), "incident_id": initial_state.get("incident_id")})
                     result.incidents.append(initial_state)
             else:
                 result.incidents.append(initial_state)
@@ -371,7 +419,7 @@ class AnalysisService:
             except Exception as e:
                 # If we fail during persistence, mark the job as failed
                 if getattr(result, "job_id", None):
-                    with cast(UnitOfWork, self.uow) as uow: # type: ignore
+                    with cast(UnitOfWork, self.uow) as uow:
                         from agent.persistence.orm_models import IngestionJob
                         job = uow.session.query(IngestionJob).get(result.job_id)
                         if job:
@@ -432,8 +480,8 @@ class AnalysisService:
             incident_bundle = incident.model_dump(mode="json")
             
         return {
-            "incident": incident_bundle, # Pass true incident bundle!
-            "incident_id": incident_id,
+            "incident": cast(dict, incident_bundle), # Pass true incident bundle!
+            "incident_id": str(incident_id),
             "canonical_events": canonical_events,
             "messages": [],
             "iteration_count": 0,
