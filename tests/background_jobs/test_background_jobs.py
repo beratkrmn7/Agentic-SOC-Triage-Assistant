@@ -214,3 +214,58 @@ def test_api_never_returns_staged_local_path(client, db_session):
     res2 = client.get(f"/api/v1/analysis-jobs/{job_id}/result")
     data2 = res2.json()
     assert "tmp" not in str(data2).lower()
+
+def test_failed_job_retry_staging(client, db_session, worker, staging_dir):
+    # Ensure clean state
+    db_session.query(IngestionJob).delete()
+    db_session.commit()
+    
+    # 1. Submit a valid file
+    test_content = b'[]'
+    res1 = client.post(
+        "/api/v1/analysis-jobs/file",
+        files={"file": ("test.json", BytesIO(test_content), "application/json")}
+    )
+    data1 = res1.json()
+    job_id = data1["job_id"]
+    
+    # 2. Simulate job becoming failed
+    job = db_session.query(IngestionJob).get(job_id)
+    job.status = "failed"
+    job.error_code = "SOME_ERROR"
+    db_session.commit()
+    
+    # 3. Remove its original staged file
+    staged_file_path = os.path.join(staging_dir, job_id)
+    if os.path.exists(staged_file_path):
+        os.remove(staged_file_path)
+        
+    # 4. Submit identical file again
+    res2 = client.post(
+        "/api/v1/analysis-jobs/file",
+        files={"file": ("test.json", BytesIO(test_content), "application/json")}
+    )
+    data2 = res2.json()
+    
+    # Assertions
+    assert data2["reused"] is True
+    assert data2["job_id"] == job_id
+    assert data2["status"] == "queued"
+    
+    # 5. Assert staged file exists under existing job_id
+    assert os.path.exists(staged_file_path)
+    
+    # Refresh job to check error code is cleared
+    db_session.expire_all()
+    job = db_session.query(IngestionJob).get(job_id)
+    assert job.error_code is None
+    
+    # 6. Run the worker
+    while worker.run_once():
+        pass
+        
+    # 7. Assert status=completed and staged file removed
+    db_session.expire_all()
+    job = db_session.query(IngestionJob).get(job_id)
+    assert job.status == "completed"
+    assert not os.path.exists(staged_file_path)

@@ -20,6 +20,10 @@ class FileStagingStore(Protocol):
     def remove_file(self, job_id: str) -> None:
         """Removes a staged file and cleans up resources."""
         ...
+        
+    def move_file(self, src_job_id: str, dest_job_id: str) -> None:
+        """Moves a staged file from one job ID to another."""
+        ...
 
 class LocalFileStagingStore:
     def __init__(self, staging_dir: str, max_size_bytes: int = 50 * 1024 * 1024):
@@ -66,3 +70,13 @@ class LocalFileStagingStore:
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning(f"Failed to remove staged file {staged_path}: {e}")
+
+    def move_file(self, src_job_id: str, dest_job_id: str) -> None:
+        src_path = self.staging_dir / src_job_id
+        dest_path = self.staging_dir / dest_job_id
+        if not src_path.exists():
+            raise StagingError(f"Source file not found for job {src_job_id}")
+        if dest_path.exists():
+            dest_path.unlink()
+        import shutil
+        shutil.move(str(src_path), str(dest_path))

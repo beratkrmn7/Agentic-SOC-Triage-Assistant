@@ -41,16 +41,20 @@ class BackgroundAnalysisService:
             # 3. Check idempotency
             job = self.uow.session.query(IngestionJob).filter_by(idempotency_key=idempotency_key).first()
             if job:
-                self.staging_store.remove_file(job_id) # Clean up the newly staged file because we reuse the old job
                 if job.status in ("queued", "processing", "completed"):
+                    self.staging_store.remove_file(job_id) # Clean up the newly staged file because we reuse the old job
                     if job.status == "completed":
                         job.reused_count += 1  # type: ignore
                         job.last_requested_at = func.now()  # type: ignore
                         self.uow.session.commit()
                     return str(job.id), True, str(job.status)
                 elif job.status == "failed":
+                    # Move the newly uploaded file to the existing job's staging path
+                    self.staging_store.move_file(job_id, str(job.id))
+                    
                     # Retry
                     job.status = "queued"  # type: ignore
+                    job.error_code = None  # type: ignore
                     job.queued_at = func.now()  # type: ignore
                     job.reused_count += 1  # type: ignore
                     job.last_requested_at = func.now()  # type: ignore
