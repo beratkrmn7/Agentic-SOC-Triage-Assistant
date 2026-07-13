@@ -7,6 +7,14 @@ import uvicorn
 import os
 import tempfile
 import uuid
+import hashlib
+
+def calculate_file_sha256(filepath: str) -> str:
+    sha256_hash = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
 
 from agent.config import get_settings
 from agent.errors import InputTooLargeError, UnsupportedInputFormatError, InvalidEncodingError
@@ -204,11 +212,28 @@ async def detect_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(ge
     Returns signals and incidents without invoking the LLM triage graph.
     """
     from agent.application.analysis_service import AnalysisService
+    from agent.application.errors import DuplicateAnalysisError
     temp_path = await secure_save_upload(file)
         
     try:
+        pipeline_version = "1.0.0"
+        analysis_mode = "detect"
+        file_sha256 = calculate_file_sha256(temp_path)
+        idempotency_key = f"{file_sha256}:{pipeline_version}:{analysis_mode}"
+        
         svc = AnalysisService(uow=uow)
-        result = svc.analyze_file(temp_path, run_triage=False, source_name="api_detect")
+        try:
+            result = svc.analyze_file(
+                temp_path, 
+                run_triage=False, 
+                source_name="api_detect",
+                file_sha256=file_sha256,
+                idempotency_key=idempotency_key,
+                pipeline_version=pipeline_version,
+                analysis_mode=analysis_mode
+            )
+        except DuplicateAnalysisError:
+            raise HTTPException(status_code=409, detail="Analysis already in progress for this file and mode.")
         det_result = result.detection_result
         ingest_result = result.ingestion_result
         
@@ -241,6 +266,8 @@ async def detect_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(ge
                 })
                 
         return {
+            "reused": getattr(result, "reused", False),
+            "job_id": getattr(result, "job_id", None),
             "ingestion": {
                 "total_records": ingest_result.metrics.total_records if ingest_result else 0,
                 "parsed_records": ingest_result.metrics.parsed_records if ingest_result else 0,
@@ -262,6 +289,8 @@ async def detect_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(ge
             "warnings": det_result.warnings if det_result else []
         }
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         import logging
         logging.error(f"Error in /detect/file: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="internal_error")
@@ -275,11 +304,28 @@ async def analyze_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(g
     Analyze a raw JSONL log file, performing full ingestion, filtering, correlation, and LLM triage.
     """
     from agent.application.analysis_service import AnalysisService
+    from agent.application.errors import DuplicateAnalysisError
     temp_path = await secure_save_upload(file)
         
     try:
+        pipeline_version = "1.0.0"
+        analysis_mode = "analyze"
+        file_sha256 = calculate_file_sha256(temp_path)
+        idempotency_key = f"{file_sha256}:{pipeline_version}:{analysis_mode}"
+        
         svc = AnalysisService(uow=uow)
-        result = svc.analyze_file(temp_path, run_triage=True, source_name="api_analyze")
+        try:
+            result = svc.analyze_file(
+                temp_path, 
+                run_triage=True, 
+                source_name="api_analyze",
+                file_sha256=file_sha256,
+                idempotency_key=idempotency_key,
+                pipeline_version=pipeline_version,
+                analysis_mode=analysis_mode
+            )
+        except DuplicateAnalysisError:
+            raise HTTPException(status_code=409, detail="Analysis already in progress for this file and mode.")
         
         incident_summaries = []
         for inc_state in result.incidents:
@@ -296,6 +342,8 @@ async def analyze_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(g
             })
             
         return {
+            "reused": getattr(result, "reused", False),
+            "job_id": getattr(result, "job_id", None),
             "ingestion_metrics": result.ingestion_result.metrics.model_dump() if result.ingestion_result else {},
             "filtered_events": len(result.event_map),
             "incidents_generated": len(incident_summaries),

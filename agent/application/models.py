@@ -15,3 +15,12 @@ class AnalysisResult(BaseModel):
     # Maps of domain entities
     event_map: Dict[str, CanonicalLogEvent] = {}
     signal_map: Dict[str, DetectionSignal] = {}
+    
+    # Idempotency fields
+    job_id: Optional[str] = None
+    reused: bool = False
+    idempotency_status: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    file_sha256: Optional[str] = None
+    pipeline_version: Optional[str] = None
+    analysis_mode: Optional[str] = None

@@ -1,4 +1,5 @@
-import os, glob, re
+import glob
+import re
 
 for p in glob.glob('tests/**/*.py', recursive=True):
     with open(p, 'r') as f:

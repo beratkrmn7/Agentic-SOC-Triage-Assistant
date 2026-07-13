@@ -17,7 +17,6 @@ class DummyParser2(BaseLogParser):
     def match(cls, raw, ctx): return ParserMatch(matched=True, confidence=0.88, reason="")
     def parse(self, raw, ctx, evt): return None
 
-import logging
 from unittest.mock import patch
 
 @patch("agent.parsers.registry.logger")

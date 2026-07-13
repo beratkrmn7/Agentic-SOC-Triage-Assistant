@@ -7,12 +7,17 @@ class IngestionJob(Base):
     __tablename__ = "ingestion_jobs"
     
     id = Column(String, primary_key=True)
+    idempotency_key = Column(String, unique=True, index=True, nullable=True)
     source_name = Column(String, index=True)
     original_filename = Column(String, nullable=True)
     file_sha256 = Column(String, nullable=True)
+    pipeline_version = Column(String, nullable=True)
+    analysis_mode = Column(String, nullable=True)
     status = Column(String, default="pending")
     error_code = Column(String, nullable=True)
     input_format = Column(String)
+    reused_count = Column(Integer, default=0)
+    last_requested_at = Column(DateTime(timezone=True), nullable=True)
     
     created_at = Column(DateTime(timezone=True), default=func.now())
     updated_at = Column(DateTime(timezone=True), default=func.now(), onupdate=func.now())
@@ -27,6 +32,13 @@ class IngestionJob(Base):
     duration_ms = Column(Integer, default=0)
     parser_counts = Column(JSON, default=dict)
     error_counts = Column(JSON, default=dict)
+    
+    events = relationship("CanonicalEvent", backref="job", cascade="all, delete-orphan")
+    signals = relationship("DetectionSignal", backref="job", cascade="all, delete-orphan")
+    incidents = relationship("Incident", backref="job", cascade="all, delete-orphan")
+    triage_runs = relationship("TriageRun", backref="job", cascade="all, delete-orphan")
+    reports = relationship("Report", backref="job", cascade="all, delete-orphan")
+    evidence_items = relationship("EvidenceItem", backref="job", cascade="all, delete-orphan")
 
 class CanonicalEvent(Base):
     __tablename__ = "canonical_events"
@@ -56,6 +68,7 @@ class DetectionSignal(Base):
     __tablename__ = "detection_signals"
     
     signal_id = Column(String, primary_key=True)
+    job_id = Column(String, ForeignKey("ingestion_jobs.id"), nullable=True, index=True)
     rule_id = Column(String, index=True)
     rule_name = Column(String)
     rule_version = Column(String, nullable=True)
@@ -82,6 +95,7 @@ class Incident(Base):
     __tablename__ = "incidents"
     
     incident_id = Column(String, primary_key=True)
+    job_id = Column(String, ForeignKey("ingestion_jobs.id"), nullable=True, index=True)
     title = Column(String)
     incident_type = Column(String)
     incident_family = Column(String)
@@ -138,6 +152,7 @@ class TriageRun(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     triage_run_id = Column(String, nullable=True, unique=True, index=True)
+    job_id = Column(String, ForeignKey("ingestion_jobs.id"), nullable=True, index=True)
     incident_id = Column(String, ForeignKey("incidents.incident_id"), index=True)
     started_at = Column(DateTime(timezone=True), default=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)
@@ -176,6 +191,7 @@ class EvidenceItem(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     evidence_id = Column(String, nullable=True, unique=True, index=True)
+    job_id = Column(String, ForeignKey("ingestion_jobs.id"), nullable=True, index=True)
     incident_id = Column(String, ForeignKey("incidents.incident_id"), nullable=True, index=True)
     triage_run_id = Column(Integer, ForeignKey("triage_runs.id"), index=True)
     
@@ -197,6 +213,7 @@ class Report(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     report_id = Column(String, nullable=True, unique=True, index=True)
+    job_id = Column(String, ForeignKey("ingestion_jobs.id"), nullable=True, index=True)
     incident_id = Column(String, ForeignKey("incidents.incident_id"), index=True)
     triage_run_id = Column(Integer, ForeignKey("triage_runs.id"), nullable=True)
     generated_at = Column(DateTime(timezone=True), default=func.now())

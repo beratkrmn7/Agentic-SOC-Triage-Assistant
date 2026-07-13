@@ -10,6 +10,10 @@ def test_alembic_upgrade_head_and_downgrade():
         
     try:
         os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
+        
+        from agent.config import get_settings
+        get_settings.cache_clear()
+        
         alembic_cfg = Config("alembic.ini")
         alembic_cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
         

@@ -7,6 +7,7 @@ from agent.detection.engine import DetectionEngine
 from agent.models import IncidentState
 from agent.graph import app
 import traceback
+from sqlalchemy.sql import func
 
 class AnalysisService:
     def __init__(self, uow: Optional[Any] = None):
@@ -23,11 +24,17 @@ class AnalysisService:
         
         with self.uow as uow:
             # 1. Ingestion Job
-            job_id = None
-            if result.ingestion_result:
+            # Check if job_id is already assigned (from idempotency flow)
+            job_id = result.job_id
+            
+            if result.ingestion_result and not job_id:
                 job_id = str(uuid.uuid4())
                 job = IngestionJob(
                     id=job_id,
+                    idempotency_key=getattr(result, 'idempotency_key', None),
+                    file_sha256=getattr(result, 'file_sha256', None),
+                    pipeline_version=getattr(result, 'pipeline_version', None),
+                    analysis_mode=getattr(result, 'analysis_mode', None),
                     source_name=result.ingestion_result.source_name,
                     input_format=result.ingestion_result.input_format.value,
                     total_records=result.ingestion_result.metrics.total_records,
@@ -36,9 +43,24 @@ class AnalysisService:
                     unsupported_records=result.ingestion_result.metrics.unsupported_records,
                     duration_ms=result.ingestion_result.metrics.duration_ms,
                     parser_counts=result.ingestion_result.metrics.parser_counts,
-                    error_counts=result.ingestion_result.metrics.error_counts
+                    error_counts=result.ingestion_result.metrics.error_counts,
+                    status="completed",
+                    completed_at=func.now()
                 )
                 uow.ingestion_jobs.add(job)
+            elif job_id:
+                # Update existing job
+                job = uow.session.query(IngestionJob).get(job_id)
+                if job and result.ingestion_result:
+                    job.status = "completed"
+                    job.completed_at = func.now()
+                    job.total_records = result.ingestion_result.metrics.total_records
+                    job.parsed_records = result.ingestion_result.metrics.parsed_records
+                    job.failed_records = result.ingestion_result.metrics.failed_records
+                    job.unsupported_records = result.ingestion_result.metrics.unsupported_records
+                    job.duration_ms = result.ingestion_result.metrics.duration_ms
+                    job.parser_counts = result.ingestion_result.metrics.parser_counts
+                    job.error_counts = result.ingestion_result.metrics.error_counts
             
             # 2. Canonical Events
             for event in result.event_map.values():
@@ -115,25 +137,127 @@ class AnalysisService:
                             
             # 8. Commit (happens on context exit)
 
-    def analyze_file(self, file_path: str, *, run_triage: bool = True, source_name: Optional[str] = None) -> AnalysisResult:
-        # 1. Ingestion
+    def analyze_file(self, file_path: str, *, run_triage: bool = True, source_name: Optional[str] = None, file_sha256: Optional[str] = None, idempotency_key: Optional[str] = None, pipeline_version: Optional[str] = None, analysis_mode: Optional[str] = None) -> AnalysisResult:
+        # 1. Check Idempotency if key is provided
+        from agent.persistence.orm_models import IngestionJob
+        import uuid
+        from sqlalchemy.exc import IntegrityError
+        from agent.application.errors import DuplicateAnalysisError
+        from sqlalchemy.sql import func
+        from agent.persistence.mappers import DataMapper
+        
+        job_id = None
+        
+        if self.uow and idempotency_key:
+            with self.uow as uow:
+                job = uow.session.query(IngestionJob).filter_by(idempotency_key=idempotency_key).first()
+                if job:
+                    if job.status == "processing":
+                        raise DuplicateAnalysisError(status="processing")
+                    elif job.status == "failed":
+                        # Retry
+                        job.status = "processing"
+                        job.reused_count += 1
+                        job.last_requested_at = func.now()
+                        uow.session.commit()
+                        job_id = job.id
+                    elif job.status == "completed":
+                        # Hydrate results from DB
+                        job.reused_count += 1
+                        job.last_requested_at = func.now()
+                        uow.session.commit()
+                        
+                        # Build AnalysisResult from DB
+                        result = AnalysisResult(
+                            source_name=job.source_name,
+                            job_id=job.id,
+                            reused=True,
+                            idempotency_status="reused_completed_result",
+                            event_map={},
+                            signal_map={},
+                            incidents=[]
+                        )
+                        # We don't reconstruct everything perfectly, but we reconstruct the required IncidentStates
+                        from agent.detection.models import DetectionResult
+                        from agent.detection.models import DetectionMetrics
+                        result.detection_result = DetectionResult(
+                            signals=[], 
+                            incidents=[], 
+                            suppressed_signals=[], 
+                            uncorrelated_event_ids=[], 
+                            warnings=[], 
+                            metrics=DetectionMetrics(total_signals=0, critical_signals=0, high_signals=0, duration_ms=0)
+                        )
+                        
+                        for sig in job.signals:
+                            domain_sig = DataMapper.orm_to_domain_signal(sig)
+                            result.detection_result.signals.append(domain_sig)
+                        for inc in job.incidents:
+                            domain_inc = DataMapper.orm_to_domain_incident(inc)
+                            result.detection_result.incidents.append(domain_inc)
+                            
+                            state = {"incident_id": inc.incident_id, "incident": domain_inc.model_dump(mode="json")}
+                            triage_runs = [tr for tr in job.triage_runs if tr.incident_id == inc.incident_id]
+                            if triage_runs:
+                                last_run = sorted(triage_runs, key=lambda r: r.started_at, reverse=True)[0]
+                                state["triage_verdict"] = last_run.verdict
+                                state["incident_type"] = last_run.incident_type
+                                state["severity"] = last_run.severity
+                                state["confidence_score"] = last_run.confidence_score
+                                
+                                reports = [rp for rp in job.reports if rp.triage_run_id == last_run.id]
+                                if reports:
+                                    state["final_report"] = reports[0].content
+                            result.incidents.append(state)
+                            
+                        return result
+                else:
+                    # Create placeholder processing job
+                    job_id = str(uuid.uuid4())
+                    job = IngestionJob(
+                        id=job_id,
+                        idempotency_key=idempotency_key,
+                        file_sha256=file_sha256,
+                        pipeline_version=pipeline_version,
+                        analysis_mode=analysis_mode,
+                        status="processing",
+                        source_name=source_name or "api"
+                    )
+                    uow.ingestion_jobs.add(job)
+                    try:
+                        uow.session.commit()
+                    except IntegrityError:
+                        uow.session.rollback()
+                        # Race condition lost, another thread inserted it
+                        raise DuplicateAnalysisError(status="processing")
+
+        # 2. Ingestion
         ingest_result = self.ingest.ingest_file(file_path)
-        return self._process_events(
+        
+        # 3. Process Events
+        res = self._process_events(
             events=ingest_result.events,
             run_triage=run_triage,
             ingestion_result=ingest_result,
-            source_name=source_name or ingest_result.source_name
+            source_name=source_name or ingest_result.source_name,
+            job_id=job_id,
+            file_sha256=file_sha256,
+            idempotency_key=idempotency_key,
+            pipeline_version=pipeline_version,
+            analysis_mode=analysis_mode
         )
+        return res
 
     def analyze_events(self, events: List[CanonicalLogEvent], *, run_triage: bool = True) -> AnalysisResult:
         return self._process_events(
             events=events,
             run_triage=run_triage,
             ingestion_result=None,
-            source_name="api"
+            source_name="api",
+            job_id=None
         )
 
-    def _process_events(self, events: List[CanonicalLogEvent], run_triage: bool, ingestion_result: Any, source_name: str) -> AnalysisResult:
+    def _process_events(self, events: List[CanonicalLogEvent], run_triage: bool, ingestion_result: Any, source_name: str, job_id: Optional[str] = None, file_sha256: Optional[str] = None, idempotency_key: Optional[str] = None, pipeline_version: Optional[str] = None, analysis_mode: Optional[str] = None) -> AnalysisResult:
         # 2. Filtering
         filter_result = self.filter_engine.filter_events(events)
         
@@ -149,7 +273,12 @@ class AnalysisService:
             detection_result=det_result,
             event_map=event_map,
             signal_map=signal_map,
-            incidents=[]
+            incidents=[],
+            job_id=job_id,
+            file_sha256=file_sha256,
+            idempotency_key=idempotency_key,
+            pipeline_version=pipeline_version,
+            analysis_mode=analysis_mode
         )
         
         # 4. Persistence setup (Optional Phase 5 integration point)
@@ -173,7 +302,19 @@ class AnalysisService:
                 
         # 6. Persistence
         if self.uow:
-            self._persist_analysis(result, run_triage)
+            try:
+                self._persist_analysis(result, run_triage)
+            except Exception as e:
+                # If we fail during persistence, mark the job as failed
+                if getattr(result, "job_id", None):
+                    with self.uow as uow:
+                        from agent.persistence.orm_models import IngestionJob
+                        job = uow.session.query(IngestionJob).get(result.job_id)
+                        if job:
+                            job.status = "failed"
+                            job.error_code = str(e)
+                            uow.session.commit()
+                raise
                 
         return result
 

@@ -5,7 +5,6 @@ from agent.persistence.orm_models import (
 from agent.ingestion.models import CanonicalLogEvent
 from agent.detection.models import DetectionSignal as DomainDetectionSignal
 from agent.detection.models import IncidentBundle
-from typing import List, Dict, Any
 
 class DataMapper:
     @staticmethod
@@ -52,9 +51,10 @@ class DataMapper:
         )
 
     @staticmethod
-    def domain_signal_to_orm(signal: DomainDetectionSignal) -> DetectionSignal:
+    def domain_signal_to_orm(signal: DomainDetectionSignal, job_id: str = None) -> DetectionSignal:
         return DetectionSignal(
             signal_id=signal.signal_id,
+            job_id=job_id,
             rule_id=signal.rule_id,
             rule_name=signal.rule_name,
             rule_version=getattr(signal, 'rule_version', None),
@@ -94,9 +94,10 @@ class DataMapper:
         )
 
     @staticmethod
-    def domain_incident_to_orm(bundle: IncidentBundle) -> Incident:
+    def domain_incident_to_orm(bundle: IncidentBundle, job_id: str = None) -> Incident:
         inc = Incident(
             incident_id=bundle.incident_id,
+            job_id=job_id,
             title=bundle.title,
             incident_type=bundle.incident_type,
             incident_family=bundle.incident_family,

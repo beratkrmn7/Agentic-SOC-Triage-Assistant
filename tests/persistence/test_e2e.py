@@ -17,8 +17,7 @@ from agent.persistence.orm_models import Incident
 def setup_test_db(db_path: str):
     # Set config to point to this temp DB
     os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
-    settings = get_settings()
-    settings.database_url = f"sqlite:///{db_path}"
+    get_settings.cache_clear()
     
     # Run migrations
     alembic_cfg = Config("alembic.ini")
