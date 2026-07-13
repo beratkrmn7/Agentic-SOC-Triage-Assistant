@@ -104,13 +104,48 @@ def test_submit_returns_202_and_queued_job_is_persisted(client, db_session):
     assert job.original_filename == "test.json"
     assert job.queued_at is not None
 
+def test_idempotent_submit(client, db_session):
+    # Ensure clean state
+    db_session.query(IngestionJob).delete()
+    db_session.commit()
+
+    test_content = b'{"event_type": "idempotent_test"}'
+    
+    # First submit
+    res1 = client.post(
+        "/api/v1/analysis-jobs/file",
+        files={"file": ("test.json", BytesIO(test_content), "application/json")}
+    )
+    assert res1.status_code == 202
+    data1 = res1.json()
+    assert data1["reused"] is False
+    job_id1 = data1["job_id"]
+    
+    # Second submit
+    res2 = client.post(
+        "/api/v1/analysis-jobs/file",
+        files={"file": ("test.json", BytesIO(test_content), "application/json")}
+    )
+    assert res2.status_code == 202
+    data2 = res2.json()
+    assert data2["reused"] is True
+    job_id2 = data2["job_id"]
+    
+    # Assert same job
+    assert job_id1 == job_id2
+    
+    # Assert exactly one job in DB
+    jobs = db_session.query(IngestionJob).all()
+    assert len(jobs) == 1
+    assert jobs[0].id == job_id1
+
 def test_worker_processes_queued_job(client, db_session, worker, staging_dir):
     # Cleanup any pending jobs to avoid picking up the one from the previous test
     db_session.query(IngestionJob).delete()
     db_session.commit()
     
-    # Submit job
-    test_content = b'{"timestamp": "2023-01-01T12:00:00Z", "message": "Test event"}'
+    # Submit job with a valid empty JSON array, which parses successfully to 0 records
+    test_content = b'[]'
     response = client.post(
         "/api/v1/analysis-jobs/file",
         files={"file": ("test.json", BytesIO(test_content), "application/json")}
@@ -124,17 +159,20 @@ def test_worker_processes_queued_job(client, db_session, worker, staging_dir):
     while worker.run_once():
         pass
     
-    
     # Check DB
     db_session.expire_all()
     job = db_session.query(IngestionJob).get(job_id)
-    assert job.status in ("completed", "failed")
+    assert job.status == "completed"
     assert job.attempt_count == 1
     assert job.worker_id is not None
     
     # Check API
     res = client.get(f"/api/v1/analysis-jobs/{job_id}/result")
     assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "completed"
+    assert "incident_ids" in data
+    assert "reports" in data
     
     # Ensure staging file is removed
     assert not os.path.exists(os.path.join(staging_dir, job_id))

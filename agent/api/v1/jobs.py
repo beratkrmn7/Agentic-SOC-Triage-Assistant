@@ -1,6 +1,5 @@
-from fastapi import APIRouter, Depends, UploadFile, File, Header, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
-from typing import Optional
 
 from agent.api.deps import get_uow, get_staging_store
 from agent.application.background_service import BackgroundAnalysisService
@@ -13,29 +12,28 @@ router = APIRouter(tags=["jobs"])
 @router.post("/analysis-jobs/file", status_code=202)
 async def submit_file_job(
     file: UploadFile = File(...),
-    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
-    pipeline_version: Optional[str] = Header(None, alias="X-Pipeline-Version"),
-    analysis_mode: Optional[str] = Header(None, alias="X-Analysis-Mode"),
     uow: UnitOfWork = Depends(get_uow),
     staging_store: FileStagingStore = Depends(get_staging_store)
 ):
+    from agent.config import get_settings
+    settings = get_settings()
+    
     service = BackgroundAnalysisService(uow=uow, staging_store=staging_store)
     
     # We read from file.file which is a SpooledTemporaryFile (binary stream)
-    job_id, reused = service.submit_file(
+    job_id, reused, status = service.submit_file(
         stream=file.file,
         original_filename=file.filename or "upload.bin",
         source_name="api",
-        idempotency_key=idempotency_key,
-        pipeline_version=pipeline_version,
-        analysis_mode=analysis_mode
+        pipeline_version=settings.pipeline_version,
+        analysis_mode="analyze"
     )
     
     return JSONResponse(
         status_code=202,
         content={
             "job_id": job_id,
-            "status": "queued",
+            "status": status,
             "reused": reused
         }
     )
