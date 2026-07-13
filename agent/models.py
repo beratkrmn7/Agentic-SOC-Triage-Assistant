@@ -1,5 +1,6 @@
 
-from typing import List, Optional, Literal, TypedDict, Annotated, Dict, Any, NotRequired
+from typing import List, Optional, Literal, Annotated, Dict, Any
+from typing_extensions import TypedDict, NotRequired
 from pydantic import BaseModel, Field
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
