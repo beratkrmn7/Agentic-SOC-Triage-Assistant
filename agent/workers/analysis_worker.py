@@ -4,7 +4,7 @@ import time
 import socket
 import logging
 from sqlalchemy.sql import func
-from agent.api.deps import session_factory
+from agent.api.deps import session_factory as default_session_factory
 from agent.persistence.orm_models import IngestionJob
 from agent.application.analysis_service import AnalysisService
 from agent.persistence.unit_of_work import UnitOfWork
@@ -14,13 +14,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("worker")
 
 class AnalysisWorker:
-    def __init__(self, staging_dir: str):
-        self.worker_id = socket.gethostname()
+    def __init__(self, staging_dir: str = "/tmp/agent_staging", worker_id: str = socket.gethostname(), session_factory=None):
+        self.worker_id = worker_id
         self.staging_store = LocalFileStagingStore(staging_dir=staging_dir)
+        self.session_factory = session_factory or default_session_factory
 
     def run_once(self) -> bool:
         """Runs one job. Returns True if a job was processed, False if queue was empty."""
-        db = session_factory()
+        db = self.session_factory()
         try:
             # 1. Claim a job
             # Since sqlite doesn't support SELECT FOR UPDATE SKIP LOCKED,
@@ -57,7 +58,7 @@ class AnalysisWorker:
                 file_path = self.staging_store.get_file_path(job_id)
                 
                 # Use a fresh UnitOfWork for the service
-                uow = UnitOfWork()
+                uow = UnitOfWork(session_factory=self.session_factory)
                 service = AnalysisService(uow=uow)
                 
                 logger.info(f"Worker {self.worker_id} starting analysis for job {job_id}")
