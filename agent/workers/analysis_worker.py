@@ -263,9 +263,9 @@ class AnalysisWorker:
             import datetime
             settings = get_settings()
             
-            # Find stale processing jobs
+            # Find stale processing jobs and abandoned cancellation requests.
             stale_jobs = db.query(IngestionJob).filter(
-                IngestionJob.status == "processing",
+                IngestionJob.status.in_(("processing", "cancel_requested")),
                 IngestionJob.lease_expires_at.is_not(None),
                 IngestionJob.lease_expires_at <= func.now()
             ).all()
@@ -273,6 +273,11 @@ class AnalysisWorker:
             count = 0
             for job in stale_jobs:
                 logger.warning(f"Worker {self.worker_id} recovering stale job {job.id}")
+
+                if job.status == "cancel_requested":
+                    self._finalize_cancellation(job.id)
+                    count += 1
+                    continue
                 
                 if job.attempt_count < settings.job_max_attempts:
                     # Requeue

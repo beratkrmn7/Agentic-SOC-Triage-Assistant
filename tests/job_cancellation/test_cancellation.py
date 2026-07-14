@@ -96,6 +96,19 @@ def get_job(session_factory, job_id):
         session.close()
 
 
+def set_processing_lease(session_factory, job_id, lease_expires_at):
+    session = session_factory()
+    try:
+        job = session.get(IngestionJob, job_id)
+        assert job is not None
+        job.worker_id = "disappeared-worker"
+        job.lease_expires_at = lease_expires_at
+        job.next_retry_at = lease_expires_at
+        session.commit()
+    finally:
+        session.close()
+
+
 def cancel_url(job_id):
     return f"/api/v1/analysis-jobs/{job_id}/cancel"
 
@@ -285,6 +298,106 @@ def test_processing_cancellation_eventually_becomes_cancelled(
     analyze.assert_not_called()
     assert get_job(session_factory, job_id).status == "cancelled"
     assert not staged_path.exists()
+
+
+def test_stale_cancellation_request_is_finalized_without_analysis(
+    client, session_factory, staging_store
+):
+    attempt_count = 2
+    job_id = create_job(
+        session_factory, status="processing", attempt_count=attempt_count
+    )
+    expired = datetime.datetime.now(
+        datetime.timezone.utc
+    ) - datetime.timedelta(seconds=10)
+    set_processing_lease(session_factory, job_id, expired)
+    staged_path = stage_job(staging_store, job_id)
+
+    response = client.post(cancel_url(job_id))
+    assert response.status_code == 202
+    assert response.json()["status"] == "cancel_requested"
+
+    worker = AnalysisWorker(
+        str(staging_store.staging_dir), session_factory=session_factory
+    )
+    with patch.object(AnalysisService, "analyze_file") as analyze:
+        assert worker.recover_stale_jobs() == 1
+
+    analyze.assert_not_called()
+    job = get_job(session_factory, job_id)
+    assert job.status == "cancelled"
+    assert job.cancelled_at is not None
+    assert job.worker_id is None
+    assert job.lease_expires_at is None
+    assert job.next_retry_at is None
+    assert job.attempt_count == attempt_count
+    assert not staged_path.exists()
+
+    session = session_factory()
+    try:
+        assert session.query(AuditEvent).filter_by(
+            entity_id=job_id, event_type="job_cancelled"
+        ).count() == 1
+        assert session.query(Incident).count() == 0
+        assert session.query(TriageRun).filter_by(job_id=job_id).count() == 0
+        assert session.query(EvidenceItem).filter_by(job_id=job_id).count() == 0
+        assert session.query(Report).filter_by(job_id=job_id).count() == 0
+    finally:
+        session.close()
+
+
+def test_unexpired_cancellation_request_is_not_recovered(
+    client, session_factory, staging_store
+):
+    job_id = create_job(
+        session_factory, status="processing", attempt_count=1
+    )
+    unexpired = datetime.datetime.now(
+        datetime.timezone.utc
+    ) + datetime.timedelta(minutes=5)
+    set_processing_lease(session_factory, job_id, unexpired)
+    staged_path = stage_job(staging_store, job_id)
+    assert client.post(cancel_url(job_id)).status_code == 202
+    worker = AnalysisWorker(
+        str(staging_store.staging_dir), session_factory=session_factory
+    )
+
+    assert worker.recover_stale_jobs() == 0
+
+    job = get_job(session_factory, job_id)
+    assert job.status == "cancel_requested"
+    assert job.cancelled_at is None
+    assert job.worker_id == "disappeared-worker"
+    assert job.lease_expires_at is not None
+    assert staged_path.exists()
+
+
+def test_stale_cancellation_recovery_is_idempotent(
+    client, session_factory, staging_store
+):
+    job_id = create_job(
+        session_factory, status="processing", attempt_count=1
+    )
+    expired = datetime.datetime.now(
+        datetime.timezone.utc
+    ) - datetime.timedelta(seconds=10)
+    set_processing_lease(session_factory, job_id, expired)
+    stage_job(staging_store, job_id)
+    assert client.post(cancel_url(job_id)).status_code == 202
+    worker = AnalysisWorker(
+        str(staging_store.staging_dir), session_factory=session_factory
+    )
+
+    assert worker.recover_stale_jobs() == 1
+    assert worker.recover_stale_jobs() == 0
+
+    session = session_factory()
+    try:
+        assert session.query(AuditEvent).filter_by(
+            entity_id=job_id, event_type="job_cancelled"
+        ).count() == 1
+    finally:
+        session.close()
 
 
 def test_repeated_cancellation_is_idempotent(client, session_factory, staging_store):
