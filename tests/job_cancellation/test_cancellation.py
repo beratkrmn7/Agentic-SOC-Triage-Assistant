@@ -135,7 +135,7 @@ def test_cancellation_migration_upgrades_and_downgrades(tmp_path, monkeypatch):
             "cancel_requested_by",
         }.issubset(columns)
 
-        command.downgrade(config, "-1")
+        command.downgrade(config, "df0f1324b1ad")
         columns = {column["name"] for column in inspect(engine).get_columns("ingestion_jobs")}
         assert "cancel_requested_at" not in columns
         engine.dispose()

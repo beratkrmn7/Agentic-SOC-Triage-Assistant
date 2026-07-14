@@ -1,4 +1,16 @@
-from sqlalchemy import Column, String, Integer, Float, DateTime, Boolean, JSON, ForeignKey, Table, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    Table,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from agent.persistence.database import Base
@@ -23,6 +35,32 @@ ingestion_job_incidents = Table(
     Column("job_id", String, ForeignKey("ingestion_jobs.id"), primary_key=True),
     Column("incident_id", String, ForeignKey("incidents.incident_id"), primary_key=True)
 )
+
+
+class ApiCredential(Base):
+    __tablename__ = "api_credentials"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'revoked', 'expired')",
+            name="ck_api_credentials_status",
+        ),
+    )
+
+    credential_id = Column(String(45), primary_key=True)
+    name = Column(String(120), nullable=False)
+    key_prefix = Column(String(32), nullable=False, index=True)
+    key_hash = Column(String(64), nullable=False, unique=True)
+    status = Column(String(16), nullable=False, default="active", index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    created_by_type = Column(String(32), nullable=False)
+    created_by_id = Column(String(128), nullable=False)
+    description = Column(String(500), nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+
+    __mapper_args__ = {"version_id_col": version}
 
 class IngestionJob(Base):
     __tablename__ = "ingestion_jobs"

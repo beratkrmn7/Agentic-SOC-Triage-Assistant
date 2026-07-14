@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from agent.persistence.orm_models import (
-    Incident, DetectionSignal, CanonicalEvent, 
+    ApiCredential, Incident, DetectionSignal, CanonicalEvent,
     TriageRun, EvidenceItem, Report, AuditEvent,
     IngestionJob
 )
@@ -46,6 +46,25 @@ class AuditEventRepository(GenericRepository):
 class IngestionJobRepository(GenericRepository):
     def __init__(self, session: Session):
         super().__init__(session, IngestionJob)
+
+
+class ApiCredentialRepository(GenericRepository):
+    def __init__(self, session: Session):
+        super().__init__(session, ApiCredential)
+
+    def get_by_prefix(self, key_prefix: str) -> List[ApiCredential]:
+        return (
+            self.session.query(ApiCredential)
+            .filter(ApiCredential.key_prefix == key_prefix)
+            .all()
+        )
+
+    def list_for_administration(self) -> List[ApiCredential]:
+        return (
+            self.session.query(ApiCredential)
+            .order_by(ApiCredential.created_at.asc(), ApiCredential.credential_id.asc())
+            .all()
+        )
 
 class CanonicalEventRepository(GenericRepository):
     def __init__(self, session: Session):
