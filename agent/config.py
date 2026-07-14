@@ -7,6 +7,7 @@ from functools import lru_cache
 class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
+    auth_mode: Literal["disabled", "api_key"] = "disabled"
 
     llm_enabled: bool = True
     llm_provider: Literal["groq"] = "groq"

@@ -26,6 +26,11 @@ from agent.api.v1.jobs import router as v1_jobs_router  # noqa: E402
 from agent.api.health import router as health_router  # noqa: E402
 from agent.api.v1.workers import router as v1_workers_router  # noqa: E402
 from agent.api.deps import get_uow  # noqa: E402
+from agent.api.deps import get_authenticated_principal  # noqa: E402
+from agent.application.authentication import (  # noqa: E402
+    AUTHENTICATION_ERROR,
+    AuthenticationRequiredError,
+)
 from agent.persistence.unit_of_work import UnitOfWork  # noqa: E402
 
 app = FastAPI(
@@ -35,9 +40,22 @@ app = FastAPI(
 )
 
 app.include_router(health_router, prefix="/health")
-app.include_router(v1_incidents_router, prefix="/api/v1")
-app.include_router(v1_jobs_router, prefix="/api/v1")
-app.include_router(v1_workers_router, prefix="/api/v1/workers")
+authenticated = [Depends(get_authenticated_principal)]
+app.include_router(
+    v1_incidents_router,
+    prefix="/api/v1",
+    dependencies=authenticated,
+)
+app.include_router(
+    v1_jobs_router,
+    prefix="/api/v1",
+    dependencies=authenticated,
+)
+app.include_router(
+    v1_workers_router,
+    prefix="/api/v1/workers",
+    dependencies=authenticated,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -66,6 +84,17 @@ async def invalid_encoding_handler(request: Request, exc: InvalidEncodingError):
     return JSONResponse(
         status_code=422,
         content={"code": "invalid_encoding", "message": "The uploaded file contains invalid text encoding.", "request_id": uuid.uuid4().hex}
+    )
+
+
+@app.exception_handler(AuthenticationRequiredError)
+async def authentication_required_handler(
+    request: Request, exc: AuthenticationRequiredError
+):
+    return JSONResponse(
+        status_code=401,
+        content=AUTHENTICATION_ERROR,
+        headers={"WWW-Authenticate": "Bearer"},
     )
 
 @app.exception_handler(Exception)
@@ -121,7 +150,11 @@ def readiness_check():
         return {"status": "unready", "reason": "Missing API key for LLM"}
     return {"status": "ready"}
 
-@app.post("/analyze", response_model=AnalyzeResponse)
+@app.post(
+    "/analyze",
+    response_model=AnalyzeResponse,
+    dependencies=authenticated,
+)
 def analyze_incident(req: AnalyzeRequest, uow: UnitOfWork = Depends(get_uow)):
     """
     Legacy mock endpoint: Ingest raw logs for an incident and run triage.
@@ -189,7 +222,7 @@ def analyze_incident(req: AnalyzeRequest, uow: UnitOfWork = Depends(get_uow)):
         report_status="Generated" if final_state.get('final_report') else "Not Generated"
     )
 
-@app.post("/ingest/file")
+@app.post("/ingest/file", dependencies=authenticated)
 async def ingest_file(file: UploadFile = File(...)):
     """
     Ingest a raw log file and return a metric summary. Does not run triage.
@@ -211,7 +244,7 @@ async def ingest_file(file: UploadFile = File(...)):
             os.remove(temp_path)
 
 
-@app.post("/detect/file")
+@app.post("/detect/file", dependencies=authenticated)
 async def detect_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(get_uow)):
     """
     Ingest a raw JSONL log file, parse it into Canonical Events, and return Detection Signals.
@@ -303,7 +336,7 @@ async def detect_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(ge
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-@app.post("/analyze/file")
+@app.post("/analyze/file", dependencies=authenticated)
 async def analyze_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(get_uow)):
     """
     Analyze a raw JSONL log file, performing full ingestion, filtering, correlation, and LLM triage.
@@ -364,7 +397,7 @@ async def analyze_file(file: UploadFile = File(...), uow: UnitOfWork = Depends(g
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-@app.get("/incident/{incident_id}/report")
+@app.get("/incident/{incident_id}/report", dependencies=authenticated)
 def get_incident_report(incident_id: str):
     from agent.persistence.unit_of_work import UnitOfWork
     

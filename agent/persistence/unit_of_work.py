@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from agent.persistence.database import create_engine_factory, create_session_factory
 from agent.config import get_settings
 from agent.persistence.repositories import (
-    IncidentRepository, AuditEventRepository, IngestionJobRepository,
+    ApiCredentialRepository, IncidentRepository, AuditEventRepository, IngestionJobRepository,
     CanonicalEventRepository, DetectionSignalRepository, TriageRunRepository,
     EvidenceRepository, ReportRepository
 )
@@ -22,6 +22,7 @@ class UnitOfWork:
         self.incidents = IncidentRepository(self.session)
         self.audit_events = AuditEventRepository(self.session)
         self.ingestion_jobs = IngestionJobRepository(self.session)
+        self.api_credentials = ApiCredentialRepository(self.session)
         self.canonical_events = CanonicalEventRepository(self.session)
         self.detection_signals = DetectionSignalRepository(self.session)
         self.triage_runs = TriageRunRepository(self.session)
