@@ -34,7 +34,8 @@ class AnalysisWorker:
             # Atomic check-and-set
             updated = db.query(IngestionJob).filter(
                 IngestionJob.id == job_id,
-                IngestionJob.status == "queued"
+                IngestionJob.status == "queued",
+                (IngestionJob.next_retry_at.is_(None)) | (IngestionJob.next_retry_at <= func.now())
             ).update({
                 "status": "processing",
                 "worker_id": self.worker_id,
@@ -100,8 +101,39 @@ class AnalysisWorker:
                 if not failed_job:
                     return "failed"
                 
-                # Determine if retryable
-                is_retryable = isinstance(e, RetryableJobError)
+                from agent.triage.exceptions import (
+                    ProviderTimeoutError, ProviderUnavailableError, ProviderRateLimitError,
+                    ProviderAuthenticationError, ProviderConfigurationError, ProviderInvalidResponseError
+                )
+                
+                # Determine if retryable and get safe error code
+                if isinstance(e, ProviderTimeoutError):
+                    is_retryable = True
+                    error_code = "provider_timeout"
+                elif isinstance(e, ProviderUnavailableError):
+                    is_retryable = True
+                    error_code = "provider_unavailable"
+                elif isinstance(e, ProviderRateLimitError):
+                    is_retryable = True
+                    error_code = "provider_rate_limited"
+                elif isinstance(e, ProviderAuthenticationError):
+                    is_retryable = False
+                    error_code = "provider_authentication"
+                elif isinstance(e, ProviderConfigurationError):
+                    is_retryable = False
+                    error_code = "provider_configuration"
+                elif isinstance(e, ProviderInvalidResponseError):
+                    is_retryable = False
+                    error_code = "provider_invalid_response"
+                elif isinstance(e, RetryableJobError):
+                    is_retryable = True
+                    error_code = type(e).__name__
+                elif isinstance(e, PermanentJobError):
+                    is_retryable = False
+                    error_code = str(e)
+                else:
+                    is_retryable = False
+                    error_code = "worker_execution_failed"
                 
                 if is_retryable and failed_job.attempt_count < settings.job_max_attempts:
                     # Schedule retry
@@ -111,12 +143,12 @@ class AnalysisWorker:
                     )
                     now = datetime.datetime.now(datetime.timezone.utc)
                     failed_job.status = "queued"
-                    failed_job.error_code = type(e).__name__
+                    failed_job.error_code = error_code
                     failed_job.worker_id = None
                     failed_job.lease_expires_at = None
                     failed_job.next_retry_at = now + datetime.timedelta(seconds=delay_seconds)
                     db.commit()
-                    logger.warning(f"Worker {self.worker_id} temporarily failed job {job_id}, retrying in {delay_seconds}s. Reason: {type(e).__name__}")
+                    logger.warning(f"Worker {self.worker_id} temporarily failed job {job_id}, retrying in {delay_seconds}s. Reason: {error_code}")
                     job_status = "retry"
                 else:
                     # Permanent failure or max attempts reached
@@ -124,12 +156,10 @@ class AnalysisWorker:
                     failed_job.worker_id = None
                     failed_job.lease_expires_at = None
                     
-                    if isinstance(e, PermanentJobError):
-                        failed_job.error_code = str(e)
-                    elif is_retryable:
+                    if is_retryable:
                         failed_job.error_code = "max_attempts_reached"
                     else:
-                        failed_job.error_code = "worker_execution_failed"
+                        failed_job.error_code = error_code
                         
                     db.commit()
                     logger.error(f"Worker {self.worker_id} permanently failed job {job_id}. Reason: {failed_job.error_code}")

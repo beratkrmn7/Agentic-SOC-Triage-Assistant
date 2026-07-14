@@ -217,3 +217,72 @@ def test_raw_exception_text_is_not_stored_or_returned(isolated_worker, isolated_
     assert job.status == "failed"
     assert job.error_code == "worker_execution_failed" # generic code
     assert secret_text not in str(job.error_code)
+
+def test_provider_timeout_error_schedules_retry(isolated_worker, isolated_db, mock_staging):
+    from agent.triage.exceptions import ProviderTimeoutError
+    db = isolated_db()
+    job_id = create_job(db)
+    stage_file(mock_staging, job_id)
+    
+    with patch("agent.workers.analysis_worker.AnalysisService.analyze_file", side_effect=ProviderTimeoutError("timeout")):
+        status = isolated_worker.process_job(job_id)
+        
+    assert status == "retry"
+    db.expire_all()
+    job = db.query(IngestionJob).get(job_id)
+    assert job.status == "queued"
+    assert job.error_code == "provider_timeout"
+    assert job.attempt_count == 1
+    assert job.next_retry_at is not None
+
+def test_provider_authentication_error_is_terminal(isolated_worker, isolated_db, mock_staging):
+    from agent.triage.exceptions import ProviderAuthenticationError
+    db = isolated_db()
+    job_id = create_job(db)
+    stage_file(mock_staging, job_id)
+    
+    with patch("agent.workers.analysis_worker.AnalysisService.analyze_file", side_effect=ProviderAuthenticationError("auth failed")):
+        status = isolated_worker.process_job(job_id)
+        
+    assert status == "failed"
+    db.expire_all()
+    job = db.query(IngestionJob).get(job_id)
+    assert job.status == "failed"
+    assert job.error_code == "provider_authentication"
+    assert job.attempt_count == 1
+
+def test_early_delivery_is_ignored(isolated_worker, isolated_db, mock_staging):
+    db = isolated_db()
+    # next_retry_at in the future
+    future_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
+    job_id = create_job(db, attempt_count=1, next_retry_at=future_time)
+    stage_file(mock_staging, job_id)
+    
+    with patch("agent.workers.analysis_worker.AnalysisService.analyze_file") as mock_analyze:
+        status = isolated_worker.process_job(job_id)
+        
+    assert status == "ignored"
+    assert mock_analyze.call_count == 0
+    
+    db.expire_all()
+    job = db.query(IngestionJob).get(job_id)
+    assert job.status == "queued"
+    assert job.attempt_count == 1  # Unchanged
+
+def test_due_delivery_is_processed(isolated_worker, isolated_db, mock_staging):
+    db = isolated_db()
+    # next_retry_at in the past
+    past_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=10)
+    job_id = create_job(db, attempt_count=1, next_retry_at=past_time)
+    stage_file(mock_staging, job_id)
+    
+    with patch("agent.workers.analysis_worker.AnalysisService.analyze_file") as mock_analyze:
+        status = isolated_worker.process_job(job_id)
+        
+    assert status == "completed"
+    assert mock_analyze.call_count == 1
+    
+    db.expire_all()
+    job = db.query(IngestionJob).get(job_id)
+    assert job.status == "completed"
+    assert job.attempt_count == 2
