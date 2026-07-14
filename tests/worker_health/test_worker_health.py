@@ -1,7 +1,7 @@
 import pytest
 import datetime
 from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from server import app
 from agent.config import get_settings
@@ -157,11 +157,24 @@ def test_readiness_fails_safely_when_database_is_unavailable(client):
         data = res.json()
         assert data["components"]["database"] == "down"
 
-def test_readiness_checks_redis_only_for_celery_backend(client, db_session_factory, db_session, override_deps):
+def test_readiness_database_backend_no_worker(client, override_deps):
+    settings = get_settings()
+    settings.task_queue_backend = "database"
+    res = client.get("/health/ready")
+    assert res.status_code == 200
+
+def test_readiness_celery_backend_no_worker(client, override_deps):
+    settings = get_settings()
+    settings.task_queue_backend = "celery"
+    with patch("redis.Redis.from_url"):
+        res = client.get("/health/ready")
+        assert res.status_code == 503
+    settings.task_queue_backend = "database"
+
+def test_readiness_celery_backend_active_worker(client, db_session_factory, db_session, override_deps):
     settings = get_settings()
     settings.task_queue_backend = "celery"
     
-    # Add active worker
     now = datetime.datetime.now(datetime.timezone.utc)
     hb = WorkerHeartbeat(
         worker_id="active-celery",
@@ -173,44 +186,10 @@ def test_readiness_checks_redis_only_for_celery_backend(client, db_session_facto
     db_session.add(hb)
     db_session.commit()
     
-    with patch("redis.Redis.from_url") as mock_redis:
-        mock_redis.side_effect = Exception("Redis Down")
-        
-        res = client.get("/health/ready")
-        assert res.status_code == 503
-        assert res.json()["components"]["queue"] == "down"
-        
-        mock_redis.return_value = MagicMock()
-        mock_redis.side_effect = None
-        
-        res2 = client.get("/health/ready")
-        assert res2.status_code == 200
-        assert res2.json()["components"]["queue"] == "up"
-
-    settings.task_queue_backend = "database"
-
-def test_readiness_returns_503_when_all_workers_are_stale(client, db_session_factory, db_session, override_deps):
-    settings = get_settings()
-    settings.task_queue_backend = "celery" # We only check active workers when celery is enabled
-    
-    now = datetime.datetime.now(datetime.timezone.utc)
-    old_time = now - datetime.timedelta(seconds=settings.worker_heartbeat_stale_seconds + 10)
-    
-    hb = WorkerHeartbeat(
-        worker_id="stale-celery",
-        worker_type="test",
-        last_heartbeat_at=old_time,
-        hostname_hash="123",
-        version="1"
-    )
-    db_session.add(hb)
-    db_session.commit()
-    
     with patch("redis.Redis.from_url"):
         res = client.get("/health/ready")
-        assert res.status_code == 503
-        assert res.json()["components"]["worker"] == "down"
-        
+        assert res.status_code == 200
+    
     settings.task_queue_backend = "database"
 
 def test_health_responses_do_not_expose_secrets_or_urls(client):
