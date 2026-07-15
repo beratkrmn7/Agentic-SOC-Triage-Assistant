@@ -55,6 +55,7 @@ class InMemoryRateLimiter:
         self._clock = clock
         self._windows: dict[str, _MemoryWindow] = {}
         self._lock = threading.Lock()
+        self._next_cleanup_at = 0.0
 
     def consume(
         self,
@@ -67,6 +68,13 @@ class InMemoryRateLimiter:
         _validate_consumption(limit, window_seconds, cost)
         now = self._clock()
         with self._lock:
+            if now >= self._next_cleanup_at:
+                self._windows = {
+                    existing_key: existing_window
+                    for existing_key, existing_window in self._windows.items()
+                    if now < existing_window.reset_timestamp
+                }
+                self._next_cleanup_at = now + min(window_seconds, 60)
             window = self._windows.get(key)
             if window is None or now >= window.reset_timestamp:
                 window = _MemoryWindow(

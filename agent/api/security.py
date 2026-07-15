@@ -119,6 +119,8 @@ def _normalized_client_ip(value: str) -> str | None:
     elif candidate.count(":") == 1 and "." in candidate:
         host, separator, port = candidate.rpartition(":")
         if separator and port.isdigit():
+            if not 0 < int(port) <= 65535:
+                return None
             candidate = host
     try:
         return str(ip_address(candidate))
@@ -160,8 +162,15 @@ def trusted_client_address(scope: Scope, settings: Settings) -> str:
         settings.forwarded_headers_enabled
         and direct_address in settings.trusted_proxy_ips
     ):
+        forwarded_present = bool(_header_values(scope, b"forwarded"))
+        x_forwarded_present = bool(_header_values(scope, b"x-forwarded-for"))
         forwarded = _forwarded_for_value(scope)
         x_forwarded = _x_forwarded_for_value(scope)
+        if (
+            (forwarded_present and forwarded is None)
+            or (x_forwarded_present and x_forwarded is None)
+        ):
+            return ANONYMOUS_CLIENT_ADDRESS
         if forwarded is not None and x_forwarded is not None:
             if forwarded != x_forwarded:
                 return ANONYMOUS_CLIENT_ADDRESS
