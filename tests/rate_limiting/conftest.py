@@ -26,6 +26,7 @@ def make_rate_settings(**overrides) -> Settings:
         "auth_mode": "disabled",
         "llm_enabled": False,
         "trusted_hosts": ["localhost", "127.0.0.1", "testserver"],
+        "rate_limiting_enabled": True,
         "rate_limit_key_secret": TEST_RATE_LIMIT_SECRET,
         "rate_limit_general_requests": 1000,
         "rate_limit_auth_failures": 10,

@@ -48,3 +48,4 @@ jobs:
         python -m pytest -q --cov=agent --cov-report=term-missing
       env:
         LLM_ENABLED: false
+        RATE_LIMITING_ENABLED: false

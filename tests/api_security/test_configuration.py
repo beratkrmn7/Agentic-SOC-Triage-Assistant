@@ -14,6 +14,7 @@ def production_settings(**overrides) -> dict:
         "https_required": True,
         "trusted_hosts": ["api.example.test"],
         "llm_enabled": False,
+        "rate_limiting_enabled": True,
         "rate_limit_backend": "redis",
         "rate_limit_key_secret": "api-security-test-rate-secret-0001",
     }
