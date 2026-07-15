@@ -4,7 +4,7 @@ import datetime
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 
 @dataclass(frozen=True)
@@ -95,6 +95,91 @@ class InMemoryRateLimiter:
 
     def check_health(self) -> bool:
         return True
+
+
+class RedisRateLimiter:
+    """Distributed fixed windows using one atomic Redis Lua operation."""
+
+    _CONSUME_SCRIPT = """
+local cost = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local current = redis.call('INCRBY', KEYS[1], cost)
+if current == cost then
+    redis.call('EXPIRE', KEYS[1], window)
+end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl < 1 or ttl > window then
+    redis.call('EXPIRE', KEYS[1], window)
+    ttl = window
+end
+local maximum = limit + cost
+if current > maximum then
+    current = maximum
+    redis.call('SET', KEYS[1], current, 'EX', ttl)
+end
+return {current, ttl}
+"""
+
+    def __init__(
+        self,
+        redis_url: str,
+        *,
+        client: Any | None = None,
+        clock: Callable[[], float] = time.time,
+    ):
+        if client is None:
+            import redis
+
+            client = redis.Redis.from_url(
+                redis_url,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+                decode_responses=False,
+            )
+        self._client: Any = client
+        self._clock = clock
+
+    def consume(
+        self,
+        key: str,
+        *,
+        limit: int,
+        window_seconds: int,
+        cost: int = 1,
+    ) -> RateLimitDecision:
+        _validate_consumption(limit, window_seconds, cost)
+        try:
+            result = self._client.eval(
+                self._CONSUME_SCRIPT,
+                1,
+                key,
+                str(cost),
+                str(window_seconds),
+                str(limit),
+            )
+            current = int(result[0])
+            ttl = max(1, min(window_seconds, int(result[1])))
+        except Exception:
+            raise RateLimiterUnavailableError() from None
+
+        now = self._clock()
+        return RateLimitDecision(
+            allowed=current <= limit,
+            limit=limit,
+            remaining=max(limit - current, 0),
+            retry_after_seconds=ttl,
+            reset_at=datetime.datetime.fromtimestamp(
+                now + ttl,
+                tz=datetime.timezone.utc,
+            ),
+        )
+
+    def check_health(self) -> bool:
+        try:
+            return bool(self._client.ping())
+        except Exception:
+            return False
 
 
 def _validate_consumption(limit: int, window_seconds: int, cost: int) -> None:

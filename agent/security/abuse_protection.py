@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -11,10 +12,13 @@ from agent.security.rate_limiting import (
     RateLimitDecision,
     RateLimiter,
     RateLimiterUnavailableError,
+    InMemoryRateLimiter,
+    RedisRateLimiter,
 )
 
 
 logger = logging.getLogger(__name__)
+_DEVELOPMENT_KEY_SECRET = secrets.token_bytes(32)
 
 
 class RateLimitCategory(StrEnum):
@@ -205,3 +209,28 @@ def _event_name(category: RateLimitCategory) -> str:
         ),
         RateLimitCategory.MUTATION: "mutation_rate_limit_exceeded",
     }.get(category, "rate_limit_exceeded")
+
+
+def build_rate_limit_manager(
+    settings: Settings,
+    *,
+    limiter: RateLimiter | None = None,
+) -> RateLimitManager:
+    selected_limiter = limiter
+    if selected_limiter is None:
+        if settings.rate_limit_backend == "redis":
+            selected_limiter = RedisRateLimiter(settings.rate_limit_redis_url)
+        else:
+            selected_limiter = InMemoryRateLimiter()
+
+    configured_secret = settings.rate_limit_key_secret
+    key_secret = (
+        configured_secret.get_secret_value().encode("utf-8")
+        if configured_secret is not None
+        else _DEVELOPMENT_KEY_SECRET
+    )
+    return RateLimitManager.from_settings(
+        settings,
+        limiter=selected_limiter,
+        key_secret=key_secret,
+    )
