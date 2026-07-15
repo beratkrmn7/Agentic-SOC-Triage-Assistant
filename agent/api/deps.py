@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Callable
 from functools import lru_cache
+from typing import cast
 
 from fastapi import Depends, Header, Request
 
@@ -14,6 +15,15 @@ from agent.application.oidc_authentication import OidcJwtAuthenticationService
 from agent.persistence.unit_of_work import UnitOfWork
 from agent.persistence.database import create_engine_factory, create_session_factory
 from agent.config import Settings, get_settings
+from agent.api.rate_limiting import (
+    remember_rate_limit_decision,
+    route_identifier,
+)
+from agent.api.security import trusted_client_address
+from agent.security.abuse_protection import (
+    RateLimitCategory,
+    RateLimitManager,
+)
 from agent.security.authorization import (
     AuthorizationDeniedError,
     Permission,
@@ -50,6 +60,10 @@ def get_dispatcher():
     return DatabasePollingDispatcher()
 
 
+def get_rate_limit_manager(request: Request) -> RateLimitManager:
+    return request.app.state.rate_limit_manager
+
+
 @lru_cache(maxsize=8)
 def _get_cached_oidc_authentication_service(
     configuration: OidcConfiguration,
@@ -79,48 +93,76 @@ def _is_jwt_shaped(credential: str) -> bool:
 
 
 def get_authenticated_principal(
+    request: Request = cast(Request, None),
     authorization: str | None = Header(default=None, alias="Authorization"),
     auth_settings: Settings = Depends(get_settings),
     uow: UnitOfWork = Depends(get_uow, use_cache=False),
     oidc_service: OidcJwtAuthenticationService | None = Depends(
         get_optional_oidc_authentication_service
     ),
+    rate_limit_manager: RateLimitManager = Depends(get_rate_limit_manager),
 ) -> AuthenticatedPrincipal:
     if auth_settings.auth_mode == "disabled":
         return local_development_principal()
 
-    if authorization is None:
-        raise AuthenticationRequiredError()
-    scheme, separator, credential = authorization.partition(" ")
-    if (
-        scheme.lower() != "bearer"
-        or separator != " "
-        or not credential
-        or any(character.isspace() for character in credential)
-    ):
-        raise AuthenticationRequiredError()
-
-    if auth_settings.auth_mode == "api_key":
-        return ApiKeyAuthenticationService(uow).authenticate(credential)
-    if auth_settings.auth_mode == "oidc":
-        if oidc_service is None:
+    try:
+        if authorization is None:
             raise AuthenticationRequiredError()
-        return oidc_service.authenticate(credential)
-    if auth_settings.auth_mode == "hybrid":
-        if credential.startswith("soc_"):
+        scheme, separator, credential = authorization.partition(" ")
+        if (
+            scheme.lower() != "bearer"
+            or separator != " "
+            or not credential
+            or any(character.isspace() for character in credential)
+        ):
+            raise AuthenticationRequiredError()
+
+        if auth_settings.auth_mode == "api_key":
             return ApiKeyAuthenticationService(uow).authenticate(credential)
-        if oidc_service is not None and _is_jwt_shaped(credential):
+        if auth_settings.auth_mode == "oidc":
+            if oidc_service is None:
+                raise AuthenticationRequiredError()
             return oidc_service.authenticate(credential)
-    raise AuthenticationRequiredError()
+        if auth_settings.auth_mode == "hybrid":
+            if credential.startswith("soc_"):
+                return ApiKeyAuthenticationService(uow).authenticate(
+                    credential
+                )
+            if oidc_service is not None and _is_jwt_shaped(credential):
+                return oidc_service.authenticate(credential)
+        raise AuthenticationRequiredError()
+    except AuthenticationRequiredError:
+        decision = rate_limit_manager.enforce_anonymous(
+            RateLimitCategory.AUTHENTICATION_FAILURE,
+            client_address=trusted_client_address(
+                request.scope,
+                auth_settings,
+            ),
+            request_id=getattr(request.state, "request_id", None),
+            route=route_identifier(request.scope),
+        )
+        remember_rate_limit_decision(request.scope, decision)
+        raise
 
 
 def require_permission(
     permission: Permission,
+    *,
+    rate_limit_category: RateLimitCategory | None = None,
 ) -> Callable[..., AuthenticatedPrincipal]:
     def permission_dependency(
         request: Request,
         principal: AuthenticatedPrincipal = Depends(get_authenticated_principal),
+        rate_limit_manager: RateLimitManager = Depends(get_rate_limit_manager),
     ) -> AuthenticatedPrincipal:
+        if rate_limit_category is not None:
+            decision = rate_limit_manager.enforce_principal(
+                rate_limit_category,
+                principal=principal,
+                request_id=getattr(request.state, "request_id", None),
+                route=route_identifier(request.scope),
+            )
+            remember_rate_limit_decision(request.scope, decision)
         if has_permission(principal.roles, permission):
             return principal
 
