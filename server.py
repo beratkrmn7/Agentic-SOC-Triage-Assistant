@@ -317,7 +317,13 @@ async def detect_file(
                 analysis_mode=analysis_mode
             )
         except DuplicateAnalysisError:
-            raise HTTPException(status_code=409, detail="Analysis already in progress for this file and mode.")
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "analysis_already_in_progress",
+                    "message": "Analysis is already in progress.",
+                },
+            )
         det_result = result.detection_result
         ingest_result = result.ingestion_result
         
@@ -414,7 +420,13 @@ async def analyze_file(
                 analysis_mode=analysis_mode
             )
         except DuplicateAnalysisError:
-            raise HTTPException(status_code=409, detail="Analysis already in progress for this file and mode.")
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "analysis_already_in_progress",
+                    "message": "Analysis is already in progress.",
+                },
+            )
         
         incident_summaries = []
         for inc_state in result.incidents:

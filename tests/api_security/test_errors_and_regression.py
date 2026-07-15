@@ -215,6 +215,30 @@ def test_expected_domain_error_retains_existing_code(app_factory):
     assert response.json()["detail"]["code"] == "invalid_incident_transition"
 
 
+def test_analysis_conflict_contract_remains_machine_readable(
+    app_factory,
+    monkeypatch,
+):
+    from agent.application.analysis_service import AnalysisService
+    from agent.application.errors import DuplicateAnalysisError
+
+    def duplicate_analysis(*args, **kwargs):
+        raise DuplicateAnalysisError("processing")
+
+    monkeypatch.setattr(AnalysisService, "analyze_file", duplicate_analysis)
+    application = app_factory()
+    with TestClient(application) as client:
+        response = client.post(
+            "/detect/file",
+            files={"file": ("events.jsonl", b"{}\n", "application/json")},
+        )
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "analysis_already_in_progress",
+        "message": "Analysis is already in progress.",
+    }
+
+
 def test_server_generates_request_id(app_factory):
     application = app_factory()
     with TestClient(application) as client:
