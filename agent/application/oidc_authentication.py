@@ -102,9 +102,20 @@ class OidcJwtAuthenticationService:
             or len(subject) > MAX_SUBJECT_LENGTH
         ):
             raise ValueError("jwt_subject_invalid")
-        token_use = claims.get("token_use")
-        if token_use is not None and token_use != "access":
+        has_token_use_claim = self.configuration.token_use_claim in claims
+        token_use_matches = (
+            claims.get(self.configuration.token_use_claim)
+            == self.configuration.access_token_use_value
+        )
+        if has_token_use_claim and not token_use_matches:
             raise ValueError("jwt_token_use_invalid")
+        header_marks_access_token = token_type == "at+jwt"
+        if (
+            self.configuration.require_access_token_indicator
+            and not header_marks_access_token
+            and not token_use_matches
+        ):
+            raise ValueError("jwt_access_token_indicator_missing")
 
         roles = self.role_mapper.map_claims(claims)
         display_name = self._display_name(claims)

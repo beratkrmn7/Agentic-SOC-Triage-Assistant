@@ -39,7 +39,13 @@ The application validates:
 - API audience;
 - expiration and optional not-before time;
 - required stable subject claim;
-- supported token type and access-token marker when present.
+- an explicit access-token indicator: `typ=at+jwt`, or the configured token-use
+  claim and value.
+
+Generic `typ=JWT` tokens without an access-token indicator are rejected. An
+explicit non-access token-use value is also rejected, even when the header says
+`typ=at+jwt`. Roles, username, email, and a valid signature do not establish
+that a token is an API access token.
 
 `sub` is the stable human identity. Email, username, domain, scopes, claim
 ordering, and group-name similarity never create roles or admin privileges.
@@ -56,6 +62,11 @@ timeouts, thread-safe TTL caches, and no redirects. They are not fetched for
 every request. If a token contains an unknown `kid`, the server refreshes JWKS
 once and retries key selection once, which supports normal provider signing-key
 rotation.
+
+Readiness validates both discovery metadata and at least one usable signing
+key. A previously validated JWKS remains usable for readiness until
+`OIDC_JWKS_CACHE_TTL_SECONDS` expires; after expiry, a failed bounded refresh
+marks the identity provider down.
 
 Malformed metadata, malformed keys, issuer mismatch, unknown keys, or provider
 network errors fail closed with the generic authentication response. Discovery
@@ -108,6 +119,9 @@ OIDC_CLOCK_SKEW_SECONDS=30
 OIDC_HTTP_TIMEOUT_SECONDS=5
 OIDC_METADATA_CACHE_TTL_SECONDS=300
 OIDC_JWKS_CACHE_TTL_SECONDS=300
+OIDC_TOKEN_USE_CLAIM=token_use
+OIDC_ACCESS_TOKEN_USE_VALUE=access
+OIDC_REQUIRE_ACCESS_TOKEN_INDICATOR=true
 OIDC_ROLES_CLAIM=roles
 OIDC_ROLE_MAPPING={"soc-viewer":"viewer","soc-analyst":"analyst","soc-service":"service","soc-admin":"admin"}
 OIDC_DISPLAY_NAME_CLAIM=preferred_username
@@ -116,6 +130,9 @@ OIDC_REQUIRE_HTTPS=true
 
 When `AUTH_MODE` is `oidc` or `hybrid`, issuer and audience are mandatory and
 the role mapping and asymmetric algorithm allowlist are validated at startup.
+`OIDC_REQUIRE_ACCESS_TOKEN_INDICATOR` must remain `true`; provider compatibility
+is configured through the trusted claim name and access-token value instead of
+disabling access-token discrimination.
 Do not place provider client secrets, real tenant identifiers, private keys, or
 tokens in this configuration.
 

@@ -209,6 +209,7 @@ def make_token(
     subject="human-123",
     roles=None,
     claims=None,
+    include_token_use=True,
 ) -> str:
     now = datetime.datetime.now(datetime.timezone.utc)
     payload = {
@@ -219,8 +220,9 @@ def make_token(
         "nbf": now - datetime.timedelta(seconds=1),
         "preferred_username": "SOC Analyst",
         "roles": roles if roles is not None else ["soc-analyst"],
-        "token_use": "access",
     }
+    if include_token_use:
+        payload["token_use"] = "access"
     if claims:
         payload.update(claims)
     if subject is None:
@@ -339,6 +341,11 @@ def test_symmetric_or_none_algorithm_configuration_is_rejected():
             make_settings(oidc_allowed_algorithms=algorithms)
 
 
+def test_access_token_indicator_cannot_be_disabled():
+    with pytest.raises(ValidationError):
+        make_settings(oidc_require_access_token_indicator=False)
+
+
 def test_discovery_issuer_mismatch_fails_closed(rsa_material):
     bundle = build_bundle(
         rsa_material,
@@ -400,9 +407,44 @@ def test_unknown_kid_refreshes_jwks_exactly_once_and_supports_rotation(
     assert http_client.calls.count(DISCOVERY_URL) == 1
 
 
-def test_valid_rs256_token_authenticates(oidc_bundle):
-    principal = oidc_bundle.service.authenticate(make_token(oidc_bundle))
+def test_at_jwt_access_token_without_token_use_claim_authenticates(oidc_bundle):
+    principal = oidc_bundle.service.authenticate(make_token(
+        oidc_bundle,
+        token_type="at+jwt",
+        include_token_use=False,
+    ))
     assert principal.authentication_method == "oidc_jwt"
+
+
+def test_generic_jwt_with_configured_access_token_use_authenticates(oidc_bundle):
+    principal = oidc_bundle.service.authenticate(make_token(
+        oidc_bundle,
+        token_type="JWT",
+        claims={"token_use": "access"},
+    ))
+    assert principal.authentication_method == "oidc_jwt"
+
+
+def test_generic_jwt_without_token_use_claim_is_rejected(oidc_bundle):
+    token = make_token(
+        oidc_bundle,
+        token_type="JWT",
+        include_token_use=False,
+    )
+    assert_rejected(oidc_bundle.service, token)
+
+
+def test_id_token_claims_do_not_establish_access_token_status(oidc_bundle):
+    token = make_token(
+        oidc_bundle,
+        token_type="JWT",
+        include_token_use=False,
+        claims={
+            "nonce": "id-token-nonce",
+            "email": "analyst@example.test",
+        },
+    )
+    assert_rejected(oidc_bundle.service, token)
 
 
 def test_invalid_signature_returns_generic_authentication_failure(
@@ -492,6 +534,34 @@ def test_unknown_signing_key_returns_generic_authentication_failure(oidc_bundle)
 def test_id_token_marker_is_not_accepted_as_access_token(oidc_bundle):
     token = make_token(oidc_bundle, claims={"token_use": "id"})
     assert_rejected(oidc_bundle.service, token)
+
+
+def test_missing_access_token_indicator_returns_generic_401_without_leaks(
+    oidc_bundle,
+    client_factory,
+):
+    secret_claim = "private-id-claim-value"
+    token = make_token(
+        oidc_bundle,
+        token_type="JWT",
+        include_token_use=False,
+        claims={"nonce": secret_claim},
+    )
+    with patch(
+        "agent.application.oidc_authentication.logger.warning"
+    ) as warning:
+        with client_factory(oidc_bundle.settings, oidc_bundle.service) as client:
+            response = client.get(
+                "/api/v1/incidents/",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+    assert_generic_401(response)
+    warning.assert_called_once_with("oidc_authentication_failed")
+    rendered = " ".join((response.text, str(warning.call_args)))
+    assert token not in rendered
+    assert secret_claim not in rendered
+    assert "nonce" not in rendered
 
 
 @pytest.mark.parametrize(
@@ -790,7 +860,7 @@ def test_jwt_and_authorization_header_never_appear_in_denials_logs_or_audit(
     assert "Authorization" not in audit_values
 
 
-def test_health_is_public_and_readiness_reports_safe_identity_provider_state(
+def test_discovery_and_jwks_up_reports_identity_provider_up(
     oidc_bundle, client_factory
 ):
     with client_factory(oidc_bundle.settings, oidc_bundle.service) as client:
@@ -799,7 +869,7 @@ def test_health_is_public_and_readiness_reports_safe_identity_provider_state(
 
     assert live.status_code == 200
     assert live.json() == {"status": "live"}
-    assert ready.status_code in (200, 503)
+    assert ready.status_code == 200
     assert ready.json()["components"]["identity_provider"] == "up"
     rendered = ready.text
     assert ISSUER not in rendered
@@ -825,6 +895,46 @@ def test_readiness_reports_provider_outage_without_details(
     assert ready.json()["components"]["identity_provider"] == "down"
     assert "network secret" not in ready.text
     assert ISSUER not in ready.text
+
+
+def test_discovery_up_and_jwks_down_reports_identity_provider_down(
+    rsa_material, client_factory
+):
+    bundle = build_bundle(
+        rsa_material,
+        jwks_document=OidcProviderError(
+            f"network secret while fetching {JWKS_URL}"
+        ),
+    )
+
+    with client_factory(bundle.settings, bundle.service) as client:
+        ready = client.get("/health/ready")
+
+    assert ready.status_code == 503
+    assert ready.json()["components"]["identity_provider"] == "down"
+    assert "network secret" not in ready.text
+    assert ISSUER not in ready.text
+    assert JWKS_URL not in ready.text
+
+
+def test_cached_valid_jwks_supports_readiness_until_cache_expiry(
+    oidc_bundle, client_factory
+):
+    with client_factory(oidc_bundle.settings, oidc_bundle.service) as client:
+        first = client.get("/health/ready")
+        oidc_bundle.http_client.responses[DISCOVERY_URL] = OidcProviderError(
+            "discovery network exception"
+        )
+        oidc_bundle.http_client.responses[JWKS_URL] = OidcProviderError(
+            "jwks network exception"
+        )
+        cached = client.get("/health/ready")
+
+    assert first.status_code == 200
+    assert cached.status_code == 200
+    assert cached.json()["components"]["identity_provider"] == "up"
+    assert oidc_bundle.http_client.calls.count(DISCOVERY_URL) == 1
+    assert oidc_bundle.http_client.calls.count(JWKS_URL) == 1
 
 
 def test_concurrent_valid_jwt_validation_is_safe(oidc_bundle):

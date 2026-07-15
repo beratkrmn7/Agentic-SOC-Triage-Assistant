@@ -33,6 +33,9 @@ class OidcConfiguration:
     http_timeout_seconds: float
     metadata_cache_ttl_seconds: int
     jwks_cache_ttl_seconds: int
+    token_use_claim: str
+    access_token_use_value: str
+    require_access_token_indicator: bool
     roles_claim: str
     role_mapping: tuple[tuple[str, str], ...]
     display_name_claim: str
@@ -57,6 +60,11 @@ class OidcConfiguration:
                 settings.oidc_metadata_cache_ttl_seconds
             ),
             jwks_cache_ttl_seconds=settings.oidc_jwks_cache_ttl_seconds,
+            token_use_claim=settings.oidc_token_use_claim,
+            access_token_use_value=settings.oidc_access_token_use_value,
+            require_access_token_indicator=(
+                settings.oidc_require_access_token_indicator
+            ),
             roles_claim=settings.oidc_roles_claim,
             role_mapping=tuple(sorted(settings.oidc_role_mapping.items())),
             display_name_claim=settings.oidc_display_name_claim,
@@ -300,11 +308,38 @@ class OidcSigningKeyResolver:
                 max_response_bytes=MAX_JWKS_BYTES,
             )
             parsed_keys = self._parse_jwks(document)
+            self._ensure_usable_signing_key(parsed_keys)
             self._cached_keys = parsed_keys
             self._cache_expires_at = (
                 now + self.configuration.jwks_cache_ttl_seconds
             )
             return parsed_keys
+
+    def _ensure_usable_signing_key(
+        self,
+        keys: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        for raw_key in keys.values():
+            for algorithm in self.configuration.allowed_algorithms:
+                expected_key_type = (
+                    "EC" if algorithm.startswith("ES") else "RSA"
+                )
+                if raw_key.get("kty") != expected_key_type:
+                    continue
+                declared_algorithm = raw_key.get("alg")
+                if (
+                    declared_algorithm is not None
+                    and declared_algorithm != algorithm
+                ):
+                    continue
+                try:
+                    jwt.PyJWK.from_dict(
+                        dict(raw_key), algorithm=algorithm
+                    ).key
+                except (jwt.PyJWTError, ValueError, TypeError):
+                    continue
+                return
+        raise OidcProviderError("oidc_signing_key_invalid")
 
     def _select_key(
         self,
@@ -352,3 +387,4 @@ class OidcSigningKeyResolver:
 
     def check_available(self) -> None:
         self.metadata_provider.check_available()
+        self._get_keys()

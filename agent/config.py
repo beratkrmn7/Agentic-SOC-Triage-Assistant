@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     oidc_http_timeout_seconds: float = Field(default=5, gt=0, le=30)
     oidc_metadata_cache_ttl_seconds: int = Field(default=300, ge=1, le=86400)
     oidc_jwks_cache_ttl_seconds: int = Field(default=300, ge=1, le=86400)
+    oidc_token_use_claim: str = Field(
+        default="token_use", min_length=1, max_length=128
+    )
+    oidc_access_token_use_value: str = Field(
+        default="access", min_length=1, max_length=128
+    )
+    oidc_require_access_token_indicator: bool = True
     oidc_roles_claim: str = Field(default="roles", min_length=1, max_length=128)
     oidc_role_mapping: dict[str, str] = Field(default_factory=dict)
     oidc_display_name_claim: str = Field(
@@ -142,6 +149,15 @@ class Settings(BaseSettings):
         ):
             raise ValueError("oidc_allowed_algorithms_invalid")
         self.oidc_allowed_algorithms = list(algorithms)
+
+        token_use_claim = self.oidc_token_use_claim.strip()
+        access_token_use_value = self.oidc_access_token_use_value.strip()
+        if not token_use_claim or not access_token_use_value:
+            raise ValueError("oidc_access_token_indicator_invalid")
+        if not self.oidc_require_access_token_indicator:
+            raise ValueError("oidc_access_token_indicator_required")
+        self.oidc_token_use_claim = token_use_claim
+        self.oidc_access_token_use_value = access_token_use_value
 
         if len(self.oidc_role_mapping) > 100:
             raise ValueError("oidc_role_mapping_invalid")
