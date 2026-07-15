@@ -25,7 +25,7 @@ from agent.persistence.database import Base
 from agent.persistence.orm_models import ApiCredential, AuditEvent
 from agent.persistence.unit_of_work import UnitOfWork
 from agent.security.api_keys import main as api_key_cli
-from server import app
+from server import create_app
 
 
 @pytest.fixture
@@ -41,14 +41,20 @@ def session_factory(tmp_path):
 
 
 @pytest.fixture
-def api_key_client(session_factory, monkeypatch):
-    monkeypatch.setenv("AUTH_MODE", "api_key")
-    get_settings.cache_clear()
-    app.dependency_overrides[get_uow] = lambda: UnitOfWork(session_factory)
-    with TestClient(app) as client:
+def api_key_client(session_factory):
+    settings = Settings(
+        app_env="test",
+        auth_mode="api_key",
+        llm_enabled=False,
+        rate_limit_key_secret="authentication-test-rate-secret-0001",
+    )
+    application = create_app(settings)
+    application.dependency_overrides[get_settings] = lambda: settings
+    application.dependency_overrides[get_uow] = (
+        lambda: UnitOfWork(session_factory)
+    )
+    with TestClient(application) as client:
         yield client
-    app.dependency_overrides.clear()
-    get_settings.cache_clear()
 
 
 def generate_credential(session_factory, **kwargs):

@@ -20,7 +20,7 @@ from agent.application.authentication import (
     ApiKeyAuthenticationService,
     local_development_principal,
 )
-from agent.config import get_settings
+from agent.config import Settings, get_settings
 from agent.persistence.database import Base
 from agent.persistence.orm_models import (
     ApiCredential,
@@ -39,7 +39,7 @@ from agent.security.authorization import (
     Role,
     permissions_for_roles,
 )
-from server import app
+from server import app, create_app
 
 
 class RecordingStagingStore:
@@ -93,16 +93,22 @@ def dispatcher():
 
 
 @pytest.fixture
-def api_key_client(session_factory, staging_store, dispatcher, monkeypatch):
-    monkeypatch.setenv("AUTH_MODE", "api_key")
-    get_settings.cache_clear()
-    app.dependency_overrides[get_uow] = lambda: UnitOfWork(session_factory)
-    app.dependency_overrides[get_staging_store] = lambda: staging_store
-    app.dependency_overrides[get_dispatcher] = lambda: dispatcher
-    with TestClient(app) as client:
+def api_key_client(session_factory, staging_store, dispatcher):
+    settings = Settings(
+        app_env="test",
+        auth_mode="api_key",
+        llm_enabled=False,
+        rate_limit_key_secret="authorization-test-rate-secret-0001",
+    )
+    application = create_app(settings)
+    application.dependency_overrides[get_settings] = lambda: settings
+    application.dependency_overrides[get_uow] = (
+        lambda: UnitOfWork(session_factory)
+    )
+    application.dependency_overrides[get_staging_store] = lambda: staging_store
+    application.dependency_overrides[get_dispatcher] = lambda: dispatcher
+    with TestClient(application) as client:
         yield client
-    app.dependency_overrides.clear()
-    get_settings.cache_clear()
 
 
 def generate_credential(session_factory, role: Role, **kwargs):

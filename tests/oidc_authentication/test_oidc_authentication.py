@@ -18,7 +18,6 @@ from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-import agent.api.health as health_module
 from agent.api.deps import (
     get_dispatcher,
     get_optional_oidc_authentication_service,
@@ -42,7 +41,7 @@ from agent.security.oidc import (
     OidcProviderError,
     OidcSigningKeyResolver,
 )
-from server import app
+from server import create_app
 
 
 ISSUER = "https://identity.example.test"
@@ -270,23 +269,26 @@ def dispatcher():
 
 
 @pytest.fixture
-def client_factory(session_factory, staging_store, dispatcher, monkeypatch):
+def client_factory(session_factory, staging_store, dispatcher):
     @contextmanager
     def factory(
         settings: Settings,
         oidc_service: OidcJwtAuthenticationService | None,
     ):
-        app.dependency_overrides[get_settings] = lambda: settings
-        app.dependency_overrides[get_uow] = lambda: UnitOfWork(session_factory)
-        app.dependency_overrides[get_staging_store] = lambda: staging_store
-        app.dependency_overrides[get_dispatcher] = lambda: dispatcher
-        app.dependency_overrides[
+        application = create_app(settings)
+        application.dependency_overrides[get_settings] = lambda: settings
+        application.dependency_overrides[get_uow] = (
+            lambda: UnitOfWork(session_factory)
+        )
+        application.dependency_overrides[get_staging_store] = (
+            lambda: staging_store
+        )
+        application.dependency_overrides[get_dispatcher] = lambda: dispatcher
+        application.dependency_overrides[
             get_optional_oidc_authentication_service
         ] = lambda: oidc_service
-        monkeypatch.setattr(health_module, "get_settings", lambda: settings)
-        with TestClient(app) as client:
+        with TestClient(application) as client:
             yield client
-        app.dependency_overrides.clear()
 
     return factory
 

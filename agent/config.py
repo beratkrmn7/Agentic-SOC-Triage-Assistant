@@ -26,6 +26,7 @@ TRUSTED_HOST_PATTERN = re.compile(
     r"^(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*"
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
 )
+RATE_LIMIT_PREFIX_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 DEFAULT_MAX_REQUEST_BODY_BYTES = 52 * 1024 * 1024
 
 
@@ -125,6 +126,24 @@ class Settings(BaseSettings):
     )
     oidc_require_https: bool = True
 
+    # Phase 5C.4B: transient request-rate and abuse protection.
+    rate_limiting_enabled: bool = True
+    rate_limit_backend: Literal["memory", "redis"] = "memory"
+    rate_limit_redis_url: str = "redis://localhost:6379/1"
+    rate_limit_key_secret: SecretStr | None = None
+    rate_limit_general_requests: int = Field(default=120, ge=1, le=1_000_000)
+    rate_limit_general_window_seconds: int = Field(default=60, ge=1, le=86400)
+    rate_limit_auth_failures: int = Field(default=10, ge=1, le=1_000_000)
+    rate_limit_auth_failure_window_seconds: int = Field(default=60, ge=1, le=86400)
+    rate_limit_job_submissions: int = Field(default=5, ge=1, le=1_000_000)
+    rate_limit_job_submission_window_seconds: int = Field(default=60, ge=1, le=86400)
+    rate_limit_mutations: int = Field(default=30, ge=1, le=1_000_000)
+    rate_limit_mutation_window_seconds: int = Field(default=60, ge=1, le=86400)
+    rate_limit_reads: int = Field(default=120, ge=1, le=1_000_000)
+    rate_limit_read_window_seconds: int = Field(default=60, ge=1, le=86400)
+    rate_limit_prefix: str = "soc-rate-limit"
+    rate_limit_fail_closed: bool = True
+
     llm_enabled: bool = True
     llm_provider: Literal["groq"] = "groq"
     llm_model: str = "llama-3.3-70b-versatile"
@@ -212,6 +231,21 @@ class Settings(BaseSettings):
         if self.api_docs_enabled is None:
             self.api_docs_enabled = self.app_env != "production"
 
+        self.rate_limit_prefix = self.rate_limit_prefix.strip()
+        if not RATE_LIMIT_PREFIX_PATTERN.fullmatch(self.rate_limit_prefix):
+            raise ValueError("rate_limit_prefix_invalid")
+        parsed_rate_limit_url = urlsplit(self.rate_limit_redis_url)
+        if (
+            parsed_rate_limit_url.scheme.lower() not in {"redis", "rediss"}
+            or not parsed_rate_limit_url.hostname
+            or parsed_rate_limit_url.fragment
+        ):
+            raise ValueError("rate_limit_redis_url_invalid")
+        if self.rate_limit_key_secret is not None:
+            secret_value = self.rate_limit_key_secret.get_secret_value()
+            if len(secret_value.encode("utf-8")) < 32:
+                raise ValueError("rate_limit_key_secret_too_short")
+
         if self.app_env == "production":
             if self.auth_mode == "disabled":
                 raise ValueError("production_auth_mode_required")
@@ -228,6 +262,14 @@ class Settings(BaseSettings):
                 and not self.oidc_require_https
             ):
                 raise ValueError("production_oidc_https_required")
+            if not self.rate_limiting_enabled:
+                raise ValueError("production_rate_limiting_required")
+            if self.rate_limit_backend != "redis":
+                raise ValueError("production_redis_rate_limit_required")
+            if self.rate_limit_key_secret is None:
+                raise ValueError("production_rate_limit_key_secret_required")
+            if not self.rate_limit_fail_closed:
+                raise ValueError("production_rate_limit_fail_closed_required")
 
         if self.auth_mode not in ("oidc", "hybrid"):
             return self

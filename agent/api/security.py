@@ -42,6 +42,7 @@ INTERNAL_ERROR = {
     "code": "internal_error",
     "message": "The request could not be completed.",
 }
+ANONYMOUS_CLIENT_ADDRESS = "anonymous"
 
 
 class RequestBodyTooLargeError(Exception):
@@ -101,6 +102,85 @@ def _host_is_allowed(hostname: str, allowed_hosts: Sequence[str]) -> bool:
         if pattern.startswith("*.") and hostname.endswith(pattern[1:]):
             return True
     return False
+
+
+def _normalized_client_ip(value: str) -> str | None:
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if candidate.startswith("["):
+        closing_bracket = candidate.find("]")
+        if closing_bracket < 0:
+            return None
+        suffix = candidate[closing_bracket + 1:]
+        if suffix and (not suffix.startswith(":") or not suffix[1:].isdigit()):
+            return None
+        candidate = candidate[1:closing_bracket]
+    elif candidate.count(":") == 1 and "." in candidate:
+        host, separator, port = candidate.rpartition(":")
+        if separator and port.isdigit():
+            if not 0 < int(port) <= 65535:
+                return None
+            candidate = host
+    try:
+        return str(ip_address(candidate))
+    except ValueError:
+        return None
+
+
+def _forwarded_for_value(scope: Scope) -> str | None:
+    values = _header_values(scope, b"forwarded")
+    if len(values) != 1:
+        return None
+    first_entry = values[0].split(",", 1)[0]
+    for parameter in first_entry.split(";"):
+        name, separator, value = parameter.partition("=")
+        if separator and name.strip().lower() == "for":
+            normalized = value.strip().strip('"')
+            return _normalized_client_ip(normalized)
+    return None
+
+
+def _x_forwarded_for_value(scope: Scope) -> str | None:
+    values = _header_values(scope, b"x-forwarded-for")
+    if len(values) != 1:
+        return None
+    first_value = values[0].split(",", 1)[0].strip()
+    return _normalized_client_ip(first_value)
+
+
+def trusted_client_address(scope: Scope, settings: Settings) -> str:
+    """Returns a normalized address only when the configured proxy trust allows it."""
+
+    client = scope.get("client")
+    direct_value = client[0] if client is not None else ""
+    direct_address = _normalized_client_ip(str(direct_value))
+    if direct_address is None:
+        return ANONYMOUS_CLIENT_ADDRESS
+    selected_address = direct_address
+    if (
+        settings.forwarded_headers_enabled
+        and direct_address in settings.trusted_proxy_ips
+    ):
+        forwarded_present = bool(_header_values(scope, b"forwarded"))
+        x_forwarded_present = bool(_header_values(scope, b"x-forwarded-for"))
+        forwarded = _forwarded_for_value(scope)
+        x_forwarded = _x_forwarded_for_value(scope)
+        if (
+            (forwarded_present and forwarded is None)
+            or (x_forwarded_present and x_forwarded is None)
+        ):
+            return ANONYMOUS_CLIENT_ADDRESS
+        if forwarded is not None and x_forwarded is not None:
+            if forwarded != x_forwarded:
+                return ANONYMOUS_CLIENT_ADDRESS
+            selected_address = forwarded
+        elif forwarded is not None:
+            selected_address = forwarded
+        elif x_forwarded is not None:
+            selected_address = x_forwarded
+    parsed = ip_address(selected_address)
+    return f"ipv{parsed.version}:{parsed.compressed}"
 
 
 class DeploymentBoundaryMiddleware:

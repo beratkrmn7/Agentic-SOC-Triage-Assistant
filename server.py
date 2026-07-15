@@ -36,6 +36,7 @@ from agent.security.authorization import (  # noqa: E402
     AuthorizationDeniedError,
     Permission,
 )
+from agent.security.abuse_protection import RateLimitCategory  # noqa: E402
 from agent.api.security import (  # noqa: E402
     CORS_ALLOWED_HEADERS,
     CORS_ALLOWED_METHODS,
@@ -43,6 +44,21 @@ from agent.api.security import (  # noqa: E402
     INTERNAL_ERROR,
     REQUEST_TOO_LARGE_ERROR,
     docs_urls,
+)
+from agent.api.rate_limiting import (  # noqa: E402
+    RATE_LIMITED_ERROR,
+    RATE_LIMIT_UNAVAILABLE_ERROR,
+    RateLimitMiddleware,
+    rate_limit_headers,
+    remember_rate_limit_decision,
+)
+from agent.security.abuse_protection import (  # noqa: E402
+    RateLimitExceededError,
+    build_rate_limit_manager,
+)
+from agent.security.rate_limiting import (  # noqa: E402
+    RateLimiter,
+    RateLimiterUnavailableError,
 )
 
 legacy_router = APIRouter()
@@ -100,6 +116,32 @@ async def authorization_denied_handler(
     exc: Exception,
 ) -> JSONResponse:
     return JSONResponse(status_code=403, content=FORBIDDEN_ERROR)
+
+
+async def rate_limit_exceeded_handler(
+    request: Request,
+    exc: Exception,
+) -> JSONResponse:
+    assert isinstance(exc, RateLimitExceededError)
+    remember_rate_limit_decision(request.scope, exc.decision)
+    return JSONResponse(
+        status_code=429,
+        content=RATE_LIMITED_ERROR,
+        headers=rate_limit_headers(
+            exc.decision,
+            include_retry_after=True,
+        ),
+    )
+
+
+async def rate_limit_unavailable_handler(
+    request: Request,
+    exc: Exception,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content=RATE_LIMIT_UNAVAILABLE_ERROR,
+    )
 
 async def global_exception_handler(
     request: Request,
@@ -177,10 +219,13 @@ def readiness_check():
 )
 def analyze_incident(
     req: AnalyzeRequest,
-    uow: UnitOfWork = Depends(get_uow),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.JOB_SUBMIT)
+        require_permission(
+            Permission.JOB_SUBMIT,
+            rate_limit_category=RateLimitCategory.JOB_SUBMISSION,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ):
     """
     Legacy mock endpoint: Ingest raw logs for an incident and run triage.
@@ -251,10 +296,13 @@ def analyze_incident(
 @legacy_router.post("/ingest/file")
 async def ingest_file(
     file: UploadFile = File(...),
-    settings: Settings = Depends(get_settings),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.JOB_SUBMIT)
+        require_permission(
+            Permission.JOB_SUBMIT,
+            rate_limit_category=RateLimitCategory.JOB_SUBMISSION,
+        )
     ),
+    settings: Settings = Depends(get_settings),
 ):
     """
     Ingest a raw log file and return a metric summary. Does not run triage.
@@ -282,11 +330,14 @@ async def ingest_file(
 @legacy_router.post("/detect/file")
 async def detect_file(
     file: UploadFile = File(...),
+    _principal: AuthenticatedPrincipal = Depends(
+        require_permission(
+            Permission.JOB_SUBMIT,
+            rate_limit_category=RateLimitCategory.JOB_SUBMISSION,
+        )
+    ),
     settings: Settings = Depends(get_settings),
     uow: UnitOfWork = Depends(get_uow),
-    _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.JOB_SUBMIT)
-    ),
 ):
     """
     Ingest a raw JSONL log file, parse it into Canonical Events, and return Detection Signals.
@@ -385,11 +436,14 @@ async def detect_file(
 @legacy_router.post("/analyze/file")
 async def analyze_file(
     file: UploadFile = File(...),
+    _principal: AuthenticatedPrincipal = Depends(
+        require_permission(
+            Permission.JOB_SUBMIT,
+            rate_limit_category=RateLimitCategory.JOB_SUBMISSION,
+        )
+    ),
     settings: Settings = Depends(get_settings),
     uow: UnitOfWork = Depends(get_uow),
-    _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.JOB_SUBMIT)
-    ),
 ):
     """
     Analyze a raw JSONL log file, performing full ingestion, filtering, correlation, and LLM triage.
@@ -458,7 +512,10 @@ async def analyze_file(
 def get_incident_report(
     incident_id: str,
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.REPORT_READ)
+        require_permission(
+            Permission.REPORT_READ,
+            rate_limit_category=RateLimitCategory.READ,
+        )
     ),
     uow: UnitOfWork = Depends(get_uow),
 ):
@@ -485,14 +542,23 @@ def get_incident_report(
         }
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    rate_limiter: RateLimiter | None = None,
+) -> FastAPI:
     application_settings = settings or get_settings()
+    rate_limit_manager = build_rate_limit_manager(
+        application_settings,
+        limiter=rate_limiter,
+    )
     application = FastAPI(
         title="Agentic SOC Triage Assistant",
         description="Agentic SOC Triage workflow using LangGraph and Groq",
         version="1.0.0",
         **docs_urls(application_settings),
     )
+    application.state.rate_limit_manager = rate_limit_manager
 
     application.include_router(health_router, prefix="/health")
     application.include_router(v1_incidents_router, prefix="/api/v1")
@@ -509,6 +575,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=application_settings.cors_allow_credentials,
         allow_methods=CORS_ALLOWED_METHODS,
         allow_headers=CORS_ALLOWED_HEADERS,
+    )
+    application.add_middleware(
+        RateLimitMiddleware,
+        settings=application_settings,
+        manager=rate_limit_manager,
     )
     application.add_middleware(
         DeploymentBoundaryMiddleware,
@@ -534,6 +605,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.add_exception_handler(
         AuthorizationDeniedError,
         authorization_denied_handler,
+    )
+    application.add_exception_handler(
+        RateLimitExceededError,
+        rate_limit_exceeded_handler,
+    )
+    application.add_exception_handler(
+        RateLimiterUnavailableError,
+        rate_limit_unavailable_handler,
     )
     application.add_exception_handler(Exception, global_exception_handler)
     return application
