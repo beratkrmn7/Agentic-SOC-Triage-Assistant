@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from typing import Dict, Any
+from contextlib import nullcontext
 from agent.api.deps import get_uow, require_permission
 from agent.application.authentication import AuthenticatedPrincipal
 from agent.persistence.unit_of_work import UnitOfWork
@@ -23,7 +24,8 @@ async def list_workers(
     now = datetime.datetime.now(datetime.timezone.utc)
     stale_threshold = now - datetime.timedelta(seconds=settings.worker_heartbeat_stale_seconds)
 
-    with uow:
+    uow_context = uow if uow.session is None else nullcontext(uow)
+    with uow_context:
         assert uow.session is not None
         workers_query = uow.session.query(WorkerHeartbeat).order_by(
             WorkerHeartbeat.worker_id.asc()
