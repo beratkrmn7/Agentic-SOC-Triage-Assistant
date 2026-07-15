@@ -9,6 +9,7 @@ from agent.api.deps import (
     get_uow,
     require_permission,
 )
+from agent.config import Settings, get_settings
 from agent.application.authentication import AuthenticatedPrincipal
 from agent.application.background_service import BackgroundAnalysisService
 from agent.persistence.unit_of_work import UnitOfWork
@@ -22,6 +23,7 @@ from agent.application.cancellation import (
     JobNotFoundError,
 )
 from agent.security.authorization import Permission
+from agent.security.abuse_protection import RateLimitCategory
 
 router = APIRouter(tags=["jobs"])
 
@@ -36,16 +38,17 @@ def _iso_utc(value):
 @router.post("/analysis-jobs/file", status_code=202)
 async def submit_file_job(
     file: UploadFile = File(...),
+    _principal: AuthenticatedPrincipal = Depends(
+        require_permission(
+            Permission.JOB_SUBMIT,
+            rate_limit_category=RateLimitCategory.JOB_SUBMISSION,
+        )
+    ),
+    settings: Settings = Depends(get_settings),
     uow: UnitOfWork = Depends(get_uow),
     staging_store: FileStagingStore = Depends(get_staging_store),
     dispatcher: AnalysisJobDispatcher = Depends(get_dispatcher),
-    _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.JOB_SUBMIT)
-    ),
 ):
-    from agent.config import get_settings
-    settings = get_settings()
-    
     service = BackgroundAnalysisService(uow=uow, staging_store=staging_store, dispatcher=dispatcher)
     
     try:
@@ -80,11 +83,14 @@ async def submit_file_job(
 async def cancel_job(
     job_id: str,
     request: Request,
+    principal: AuthenticatedPrincipal = Depends(
+        require_permission(
+            Permission.JOB_CANCEL,
+            rate_limit_category=RateLimitCategory.MUTATION,
+        )
+    ),
     uow: UnitOfWork = Depends(get_uow),
     staging_store: FileStagingStore = Depends(get_staging_store),
-    principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.JOB_CANCEL)
-    ),
 ):
     service = JobCancellationService(uow=uow, staging_store=staging_store)
     try:
@@ -118,10 +124,13 @@ async def cancel_job(
 @router.get("/analysis-jobs/{job_id}")
 async def get_job_status(
     job_id: str,
-    uow: UnitOfWork = Depends(get_uow),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.JOB_READ)
+        require_permission(
+            Permission.JOB_READ,
+            rate_limit_category=RateLimitCategory.READ,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ):
     with uow:
         assert uow.session is not None
@@ -144,10 +153,13 @@ async def get_job_status(
 @router.get("/analysis-jobs/{job_id}/result")
 async def get_job_result(
     job_id: str,
-    uow: UnitOfWork = Depends(get_uow),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.JOB_READ)
+        require_permission(
+            Permission.JOB_READ,
+            rate_limit_category=RateLimitCategory.READ,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ):
     with uow:
         assert uow.session is not None

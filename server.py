@@ -36,6 +36,7 @@ from agent.security.authorization import (  # noqa: E402
     AuthorizationDeniedError,
     Permission,
 )
+from agent.security.abuse_protection import RateLimitCategory  # noqa: E402
 from agent.api.security import (  # noqa: E402
     CORS_ALLOWED_HEADERS,
     CORS_ALLOWED_METHODS,
@@ -218,10 +219,13 @@ def readiness_check():
 )
 def analyze_incident(
     req: AnalyzeRequest,
-    uow: UnitOfWork = Depends(get_uow),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.JOB_SUBMIT)
+        require_permission(
+            Permission.JOB_SUBMIT,
+            rate_limit_category=RateLimitCategory.JOB_SUBMISSION,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ):
     """
     Legacy mock endpoint: Ingest raw logs for an incident and run triage.
@@ -292,10 +296,13 @@ def analyze_incident(
 @legacy_router.post("/ingest/file")
 async def ingest_file(
     file: UploadFile = File(...),
-    settings: Settings = Depends(get_settings),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.JOB_SUBMIT)
+        require_permission(
+            Permission.JOB_SUBMIT,
+            rate_limit_category=RateLimitCategory.JOB_SUBMISSION,
+        )
     ),
+    settings: Settings = Depends(get_settings),
 ):
     """
     Ingest a raw log file and return a metric summary. Does not run triage.
@@ -323,11 +330,14 @@ async def ingest_file(
 @legacy_router.post("/detect/file")
 async def detect_file(
     file: UploadFile = File(...),
+    _principal: AuthenticatedPrincipal = Depends(
+        require_permission(
+            Permission.JOB_SUBMIT,
+            rate_limit_category=RateLimitCategory.JOB_SUBMISSION,
+        )
+    ),
     settings: Settings = Depends(get_settings),
     uow: UnitOfWork = Depends(get_uow),
-    _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.JOB_SUBMIT)
-    ),
 ):
     """
     Ingest a raw JSONL log file, parse it into Canonical Events, and return Detection Signals.
@@ -426,11 +436,14 @@ async def detect_file(
 @legacy_router.post("/analyze/file")
 async def analyze_file(
     file: UploadFile = File(...),
+    _principal: AuthenticatedPrincipal = Depends(
+        require_permission(
+            Permission.JOB_SUBMIT,
+            rate_limit_category=RateLimitCategory.JOB_SUBMISSION,
+        )
+    ),
     settings: Settings = Depends(get_settings),
     uow: UnitOfWork = Depends(get_uow),
-    _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.JOB_SUBMIT)
-    ),
 ):
     """
     Analyze a raw JSONL log file, performing full ingestion, filtering, correlation, and LLM triage.
@@ -499,7 +512,10 @@ async def analyze_file(
 def get_incident_report(
     incident_id: str,
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.REPORT_READ)
+        require_permission(
+            Permission.REPORT_READ,
+            rate_limit_category=RateLimitCategory.READ,
+        )
     ),
     uow: UnitOfWork = Depends(get_uow),
 ):

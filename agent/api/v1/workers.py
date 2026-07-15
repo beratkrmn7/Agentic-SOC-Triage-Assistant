@@ -7,6 +7,7 @@ from agent.persistence.unit_of_work import UnitOfWork
 from agent.persistence.orm_models import WorkerHeartbeat
 from agent.config import get_settings
 from agent.security.authorization import Permission
+from agent.security.abuse_protection import RateLimitCategory
 import datetime
 
 router = APIRouter()
@@ -15,10 +16,13 @@ router = APIRouter()
 async def list_workers(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    uow: UnitOfWork = Depends(get_uow),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.WORKER_READ)
+        require_permission(
+            Permission.WORKER_READ,
+            rate_limit_category=RateLimitCategory.READ,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ) -> Dict[str, Any]:
     settings = get_settings()
     now = datetime.datetime.now(datetime.timezone.utc)

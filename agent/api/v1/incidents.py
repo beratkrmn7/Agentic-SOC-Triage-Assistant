@@ -6,6 +6,7 @@ from agent.application.authentication import AuthenticatedPrincipal
 from agent.persistence.unit_of_work import UnitOfWork
 from agent.persistence.lifecycle import IncidentLifecycle
 from agent.security.authorization import Permission
+from agent.security.abuse_protection import RateLimitCategory
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
 
@@ -29,10 +30,13 @@ def list_incidents(
     status: Optional[str] = None, 
     skip: int = Query(0, ge=0), 
     limit: int = Query(100, ge=1, le=1000), 
-    uow: UnitOfWork = Depends(get_uow),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.INCIDENT_READ)
+        require_permission(
+            Permission.INCIDENT_READ,
+            rate_limit_category=RateLimitCategory.READ,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ):
     with uow:
         assert uow.session is not None
@@ -61,10 +65,13 @@ def list_incidents(
 @router.get("/{incident_id}", response_model=IncidentResponse)
 def get_incident(
     incident_id: str,
-    uow: UnitOfWork = Depends(get_uow),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.INCIDENT_READ)
+        require_permission(
+            Permission.INCIDENT_READ,
+            rate_limit_category=RateLimitCategory.READ,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ):
     with uow:
         incident = uow.incidents.get(incident_id)
@@ -87,10 +94,13 @@ def update_status(
     incident_id: str,
     req: StatusUpdateRequest,
     request: Request,
-    uow: UnitOfWork = Depends(get_uow),
     principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.INCIDENT_STATUS_UPDATE)
+        require_permission(
+            Permission.INCIDENT_STATUS_UPDATE,
+            rate_limit_category=RateLimitCategory.MUTATION,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ):
     from agent.application.errors import InvalidTransitionError
     
@@ -127,10 +137,13 @@ def update_status(
 @router.get("/{incident_id}/signals")
 def get_signals(
     incident_id: str,
-    uow: UnitOfWork = Depends(get_uow),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.INCIDENT_READ)
+        require_permission(
+            Permission.INCIDENT_READ,
+            rate_limit_category=RateLimitCategory.READ,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ):
     with uow:
         incident = uow.incidents.get(incident_id)
@@ -142,10 +155,13 @@ def get_signals(
 @router.get("/{incident_id}/events")
 def get_events(
     incident_id: str,
-    uow: UnitOfWork = Depends(get_uow),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.INCIDENT_READ)
+        require_permission(
+            Permission.INCIDENT_READ,
+            rate_limit_category=RateLimitCategory.READ,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ):
     with uow:
         incident = uow.incidents.get(incident_id)
@@ -157,10 +173,13 @@ def get_events(
 @router.get("/{incident_id}/triage-runs")
 def get_triage_runs(
     incident_id: str,
-    uow: UnitOfWork = Depends(get_uow),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.INCIDENT_READ)
+        require_permission(
+            Permission.INCIDENT_READ,
+            rate_limit_category=RateLimitCategory.READ,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ):
     with uow:
         incident = uow.incidents.get(incident_id)
@@ -179,10 +198,13 @@ def get_triage_runs(
 @router.get("/{incident_id}/evidence")
 def get_evidence(
     incident_id: str,
-    uow: UnitOfWork = Depends(get_uow),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.INCIDENT_READ)
+        require_permission(
+            Permission.INCIDENT_READ,
+            rate_limit_category=RateLimitCategory.READ,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ):
     with uow:
         incident = uow.incidents.get(incident_id)
@@ -206,10 +228,13 @@ def get_evidence(
 @router.get("/{incident_id}/report")
 def get_report(
     incident_id: str,
-    uow: UnitOfWork = Depends(get_uow),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.REPORT_READ)
+        require_permission(
+            Permission.REPORT_READ,
+            rate_limit_category=RateLimitCategory.READ,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ):
     with uow:
         incident = uow.incidents.get(incident_id)
@@ -244,10 +269,13 @@ def get_report(
 @router.get("/{incident_id}/timeline")
 def get_timeline(
     incident_id: str,
-    uow: UnitOfWork = Depends(get_uow),
     _principal: AuthenticatedPrincipal = Depends(
-        require_permission(Permission.INCIDENT_AUDIT_READ)
+        require_permission(
+            Permission.INCIDENT_AUDIT_READ,
+            rate_limit_category=RateLimitCategory.READ,
+        )
     ),
+    uow: UnitOfWork = Depends(get_uow),
 ):
     with uow:
         incident = uow.incidents.get(incident_id)
