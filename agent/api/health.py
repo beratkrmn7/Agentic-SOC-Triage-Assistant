@@ -32,11 +32,7 @@ async def ready(
         get_optional_oidc_authentication_service
     ),
 ):
-    components: dict[str, str] = {
-        "database": "up",
-        "queue": "up",
-        "worker": "up",
-    }
+    components: dict[str, str] = {"database": "up"}
     status = "ready"
 
     session = uow.session
@@ -70,6 +66,8 @@ async def ready(
 
     # 2. Check Celery/Redis if enabled
     if settings.task_queue_backend == "celery":
+        components["queue"] = "up"
+        components["worker"] = "up"
         redis_client = None
         try:
             import redis

@@ -3,9 +3,12 @@ import datetime
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 
-from server import app
-from agent.config import get_settings
+from server import app, create_app
+from agent.api.deps import get_uow
+from agent.config import Settings, get_settings
 from agent.persistence.database import Base
+from agent.persistence.unit_of_work import UnitOfWork
+from agent.security.rate_limiting import RateLimiterUnavailableError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from agent.persistence.orm_models import WorkerHeartbeat, IngestionJob
@@ -63,6 +66,48 @@ def override_deps(db_session_factory):
 @pytest.fixture(scope="function")
 def client(override_deps):
     return TestClient(app)
+
+
+class HealthyRedis:
+    def ping(self):
+        return True
+
+    def close(self):
+        return None
+
+
+class UnavailableRateLimiter:
+    def consume(self, key, *, limit, window_seconds, cost=1):
+        raise RateLimiterUnavailableError()
+
+    def check_health(self):
+        return False
+
+
+def readiness_settings(*, task_queue_backend: str, **overrides) -> Settings:
+    values = {
+        "app_env": "test",
+        "auth_mode": "disabled",
+        "llm_enabled": False,
+        "task_queue_backend": task_queue_backend,
+        "rate_limiting_enabled": True,
+        "rate_limit_key_secret": "worker-health-rate-limit-secret-0001",
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+@pytest.fixture
+def readiness_app_factory(db_session_factory):
+    def factory(settings: Settings, *, rate_limiter=None):
+        application = create_app(settings, rate_limiter=rate_limiter)
+        application.dependency_overrides[get_settings] = lambda: settings
+        application.dependency_overrides[get_uow] = (
+            lambda: UnitOfWork(db_session_factory)
+        )
+        return application
+
+    return factory
 
 def test_worker_startup_creates_heartbeat(db_session_factory, db_session):
     service = WorkerHeartbeatService(session_factory=db_session_factory)
@@ -157,29 +202,57 @@ def test_readiness_fails_safely_when_database_is_unavailable(client):
         data = res.json()
         assert data["components"]["database"] == "down"
 
-def test_readiness_database_backend_no_worker(client, override_deps):
-    settings = get_settings()
-    settings.task_queue_backend = "database"
+def test_readiness_database_backend_zero_heartbeats_is_ready(
+    readiness_app_factory,
+):
+    settings = readiness_settings(task_queue_backend="database")
+    application = readiness_app_factory(settings)
     with patch(
         "redis.Redis.from_url",
         side_effect=AssertionError("Redis must not be checked"),
     ):
-        res = client.get("/health/ready")
+        with TestClient(application) as isolated_client:
+            res = isolated_client.get("/health/ready")
     assert res.status_code == 200
+    assert "queue" not in res.json()["components"]
+    assert "worker" not in res.json()["components"]
 
-def test_readiness_celery_backend_no_worker(client, override_deps):
-    settings = get_settings()
-    settings.task_queue_backend = "celery"
-    with patch("redis.Redis.from_url"):
-        res = client.get("/health/ready")
-        assert res.status_code == 503
-        assert res.json()["components"]["worker"] == "down"
-    settings.task_queue_backend = "database"
 
-def test_readiness_celery_backend_active_worker(client, db_session_factory, db_session, override_deps):
-    settings = get_settings()
-    settings.task_queue_backend = "celery"
-    
+def test_readiness_database_backend_rate_limiter_down_is_not_ready(
+    readiness_app_factory,
+):
+    settings = readiness_settings(
+        task_queue_backend="database",
+        rate_limit_backend="redis",
+    )
+    application = readiness_app_factory(
+        settings,
+        rate_limiter=UnavailableRateLimiter(),
+    )
+    with TestClient(application) as isolated_client:
+        res = isolated_client.get("/health/ready")
+    assert res.status_code == 503
+    assert res.json()["components"]["rate_limiter"] == "down"
+
+
+def test_readiness_celery_backend_redis_up_zero_heartbeats_is_not_ready(
+    readiness_app_factory,
+):
+    settings = readiness_settings(task_queue_backend="celery")
+    application = readiness_app_factory(settings)
+    with patch("redis.Redis.from_url", return_value=HealthyRedis()):
+        with TestClient(application) as isolated_client:
+            res = isolated_client.get("/health/ready")
+    assert res.status_code == 503
+    assert res.json()["components"]["queue"] == "up"
+    assert res.json()["components"]["worker"] == "down"
+
+
+def test_readiness_celery_backend_redis_up_active_heartbeat_is_ready(
+    readiness_app_factory,
+    db_session,
+):
+    settings = readiness_settings(task_queue_backend="celery")
     now = datetime.datetime.now(datetime.timezone.utc)
     hb = WorkerHeartbeat(
         worker_id="active-celery",
@@ -190,13 +263,36 @@ def test_readiness_celery_backend_active_worker(client, db_session_factory, db_s
     )
     db_session.add(hb)
     db_session.commit()
-    
-    with patch("redis.Redis.from_url"):
-        res = client.get("/health/ready")
-        assert res.status_code == 200
-        assert res.json()["components"]["worker"] == "up"
-    
-    settings.task_queue_backend = "database"
+    application = readiness_app_factory(settings)
+    with patch("redis.Redis.from_url", return_value=HealthyRedis()):
+        with TestClient(application) as isolated_client:
+            res = isolated_client.get("/health/ready")
+    assert res.status_code == 200
+    assert res.json()["components"]["worker"] == "up"
+
+
+def test_readiness_celery_backend_stale_heartbeat_is_not_ready(
+    readiness_app_factory,
+    db_session,
+):
+    settings = readiness_settings(task_queue_backend="celery")
+    stale_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        seconds=settings.worker_heartbeat_stale_seconds + 1
+    )
+    db_session.add(WorkerHeartbeat(
+        worker_id="stale-celery",
+        worker_type="test",
+        last_heartbeat_at=stale_time,
+        hostname_hash="123",
+        version="1",
+    ))
+    db_session.commit()
+    application = readiness_app_factory(settings)
+    with patch("redis.Redis.from_url", return_value=HealthyRedis()):
+        with TestClient(application) as isolated_client:
+            res = isolated_client.get("/health/ready")
+    assert res.status_code == 503
+    assert res.json()["components"]["worker"] == "down"
 
 def test_health_responses_do_not_expose_secrets_or_urls(client):
     with patch("sqlalchemy.orm.Session.execute") as mock_exec:
