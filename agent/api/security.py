@@ -1,9 +1,12 @@
 from collections.abc import Sequence
 from ipaddress import ip_address
+import re
 from typing import Any
+import uuid
 
+from starlette.datastructures import MutableHeaders
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from agent.config import Settings
 
@@ -15,6 +18,18 @@ CORS_ALLOWED_HEADERS = (
     "Content-Type",
     "If-Match",
     "X-Request-ID",
+)
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+API_CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; "
+    "form-action 'none'"
+)
+DOCS_CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; script-src 'self' https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+    "img-src 'self' data: https://fastapi.tiangolo.com; "
+    "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+    "form-action 'none'"
 )
 
 
@@ -82,6 +97,8 @@ class DeploymentBoundaryMiddleware:
         self.https_required = settings.https_required
         self.forwarded_headers_enabled = settings.forwarded_headers_enabled
         self.trusted_proxy_ips = frozenset(settings.trusted_proxy_ips)
+        self.security_headers_enabled = settings.security_headers_enabled
+        self.hsts_max_age_seconds = settings.hsts_max_age_seconds
 
     async def __call__(
         self,
@@ -92,6 +109,39 @@ class DeploymentBoundaryMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+
+        request_id = self._request_id(scope)
+        state = scope.setdefault("state", {})
+        state["request_id"] = request_id
+        effective_scheme = str(scope.get("scheme", "http")).lower()
+
+        async def send_with_security_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["X-Request-ID"] = request_id
+                if self.security_headers_enabled:
+                    headers["X-Content-Type-Options"] = "nosniff"
+                    headers["X-Frame-Options"] = "DENY"
+                    headers["Referrer-Policy"] = "no-referrer"
+                    headers["Permissions-Policy"] = (
+                        "camera=(), geolocation=(), microphone=(), "
+                        "payment=(), usb=()"
+                    )
+                    headers["Cache-Control"] = "no-store"
+                    headers["Content-Security-Policy"] = self._csp_for_scope(
+                        scope
+                    )
+                    if (
+                        self.https_required
+                        and effective_scheme == "https"
+                        and self.hsts_max_age_seconds > 0
+                    ):
+                        headers["Strict-Transport-Security"] = (
+                            f"max-age={self.hsts_max_age_seconds}"
+                        )
+                    elif "strict-transport-security" in headers:
+                        del headers["strict-transport-security"]
+            await send(message)
 
         host_values = _header_values(scope, b"host")
         hostname = (
@@ -106,7 +156,7 @@ class DeploymentBoundaryMiddleware:
             await self._send_error(
                 scope,
                 receive,
-                send,
+                send_with_security_headers,
                 status_code=400,
                 code="invalid_host",
                 message="The request host is not allowed.",
@@ -118,24 +168,39 @@ class DeploymentBoundaryMiddleware:
             await self._send_error(
                 scope,
                 receive,
-                send,
+                send_with_security_headers,
                 status_code=400,
                 code="forwarded_scheme_invalid",
                 message="The forwarded request scheme is invalid.",
             )
             return
+        effective_scheme = scheme
         if self.https_required and scheme != "https":
             await self._send_error(
                 scope,
                 receive,
-                send,
+                send_with_security_headers,
                 status_code=400,
                 code="https_required",
                 message="HTTPS is required.",
             )
             return
 
-        await self.app(scope, receive, send)
+        await self.app(scope, receive, send_with_security_headers)
+
+    @staticmethod
+    def _request_id(scope: Scope) -> str:
+        values = _header_values(scope, b"x-request-id")
+        if len(values) == 1 and REQUEST_ID_PATTERN.fullmatch(values[0]):
+            return values[0]
+        return uuid.uuid4().hex
+
+    @staticmethod
+    def _csp_for_scope(scope: Scope) -> str:
+        path = str(scope.get("path", ""))
+        if path in {"/docs", "/docs/oauth2-redirect", "/redoc"}:
+            return DOCS_CONTENT_SECURITY_POLICY
+        return API_CONTENT_SECURITY_POLICY
 
     def _request_scheme(self, scope: Scope) -> str | None:
         scheme = str(scope.get("scheme", "http")).lower()

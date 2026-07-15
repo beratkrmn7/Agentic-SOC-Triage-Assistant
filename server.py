@@ -53,7 +53,11 @@ async def input_too_large_handler(
 ) -> JSONResponse:
     return JSONResponse(
         status_code=413,
-        content={"code": "input_too_large", "message": "The uploaded file exceeds the configured size limit.", "request_id": uuid.uuid4().hex}
+        content={
+            "code": "input_too_large",
+            "message": "The uploaded file exceeds the configured size limit.",
+            "request_id": request.state.request_id,
+        },
     )
 
 async def unsupported_format_handler(
@@ -62,7 +66,11 @@ async def unsupported_format_handler(
 ) -> JSONResponse:
     return JSONResponse(
         status_code=415,
-        content={"code": "unsupported_input_format", "message": "The uploaded file format is not supported.", "request_id": uuid.uuid4().hex}
+        content={
+            "code": "unsupported_input_format",
+            "message": "The uploaded file format is not supported.",
+            "request_id": request.state.request_id,
+        },
     )
 
 async def invalid_encoding_handler(
@@ -71,7 +79,11 @@ async def invalid_encoding_handler(
 ) -> JSONResponse:
     return JSONResponse(
         status_code=422,
-        content={"code": "invalid_encoding", "message": "The uploaded file contains invalid text encoding.", "request_id": uuid.uuid4().hex}
+        content={
+            "code": "invalid_encoding",
+            "message": "The uploaded file contains invalid text encoding.",
+            "request_id": request.state.request_id,
+        },
     )
 
 
