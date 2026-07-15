@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from agent.config import Settings
+from agent.security.rate_limiting import InMemoryRateLimiter
 from server import create_app
 
 
@@ -13,6 +14,8 @@ def production_settings(**overrides) -> dict:
         "https_required": True,
         "trusted_hosts": ["api.example.test"],
         "llm_enabled": False,
+        "rate_limit_backend": "redis",
+        "rate_limit_key_secret": "api-security-test-rate-secret-0001",
     }
     values.update(overrides)
     return values
@@ -67,7 +70,10 @@ def test_production_insecure_oidc_configuration_fails():
 def test_production_docs_are_disabled_by_default():
     settings = Settings(**production_settings())
     assert settings.api_docs_enabled is False
-    application = create_app(settings)
+    application = create_app(
+        settings,
+        rate_limiter=InMemoryRateLimiter(),
+    )
 
     with TestClient(
         application,
@@ -88,7 +94,10 @@ def test_development_docs_are_available_when_enabled(app_factory):
 
 def test_valid_production_configuration_starts():
     settings = Settings(**production_settings())
-    application = create_app(settings)
+    application = create_app(
+        settings,
+        rate_limiter=InMemoryRateLimiter(),
+    )
 
     with TestClient(
         application,
