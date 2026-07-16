@@ -1,5 +1,6 @@
 from functools import lru_cache
 from ipaddress import ip_address
+from pathlib import Path
 import re
 from typing import Literal, Optional
 from urllib.parse import urlsplit
@@ -162,6 +163,18 @@ class Settings(BaseSettings):
     retention_terminal_incident_days: int = Field(default=365, ge=1, le=36_500)
     retention_audit_event_days: int = Field(default=365, ge=1, le=36_500)
 
+    # Phase 5D.2B: non-destructive operational retention archives.
+    retention_archive_backend: Literal["local"] = "local"
+    retention_archive_root: str = Field(
+        default="./var/retention-archives",
+        min_length=1,
+        max_length=4096,
+    )
+    retention_archive_batch_size: int = Field(default=1000, ge=1, le=10_000)
+    retention_archive_schema_version: Literal[
+        "retention-archive/v1"
+    ] = "retention-archive/v1"
+
     llm_enabled: bool = True
     llm_provider: Literal["groq"] = "groq"
     llm_model: str = "llama-3.3-70b-versatile"
@@ -217,6 +230,17 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_settings(self) -> "Settings":
+        if not self.retention_archive_root.strip():
+            raise ValueError("retention_archive_root_invalid")
+        archive_root = Path(self.retention_archive_root).resolve(strict=False)
+        staging_root = Path(self.staging_dir).resolve(strict=False)
+        if (
+            archive_root == staging_root
+            or archive_root.is_relative_to(staging_root)
+            or staging_root.is_relative_to(archive_root)
+        ):
+            raise ValueError("retention_archive_root_conflicts_with_staging")
+
         if not self.trusted_hosts or len(self.trusted_hosts) > 100:
             raise ValueError("trusted_hosts_invalid")
         self.trusted_hosts = list(dict.fromkeys(

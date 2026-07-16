@@ -8,6 +8,10 @@ from agent.persistence.repositories import (
     EvidenceRepository, ReportRepository
 )
 from agent.persistence.retention_repository import RetentionRepository
+from agent.persistence.archive_repository import (
+    ArchiveExportRepository,
+    RetentionArchiveRunRepository,
+)
 
 class UnitOfWork:
     def __init__(self, session_factory=None):
@@ -30,6 +34,8 @@ class UnitOfWork:
         self.evidence = EvidenceRepository(self.session)
         self.reports = ReportRepository(self.session)
         self.retention = RetentionRepository(self.session)
+        self.archive_exports = ArchiveExportRepository(self.session, self.retention)
+        self.archive_runs = RetentionArchiveRunRepository(self.session)
         return self
         
     def __exit__(self, exc_type, exc_val, traceback):

@@ -18,9 +18,12 @@ def _config(database: Path) -> Config:
     return config
 
 
-def test_retention_revision_is_the_single_head() -> None:
+def test_retention_revision_remains_in_single_head_history() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == [RETENTION_REVISION]
+    assert len(script.get_heads()) == 1
+    assert RETENTION_REVISION in {
+        revision.revision for revision in script.walk_revisions()
+    }
 
 
 def test_upgrade_creates_hold_table_constraints_and_indexes(tmp_path) -> None:
