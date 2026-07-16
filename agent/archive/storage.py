@@ -352,9 +352,9 @@ class LocalArchiveStore:
         if filename not in allowed or Path(filename).name != filename:
             raise ArchiveStorageError("archive_filename_invalid")
         path = directory / filename
-        self._ensure_contained(path, directory)
         if path.is_symlink():
             raise ArchiveStorageError("archive_symlink_forbidden")
+        self._ensure_contained(path, directory)
         return path
 
     @staticmethod

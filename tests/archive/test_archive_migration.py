@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from alembic import command
@@ -26,6 +27,15 @@ def test_archive_revision_is_the_only_alembic_head() -> None:
     revision = script.get_revision(ARCHIVE_REVISION)
     assert revision is not None
     assert revision.down_revision == RETENTION_REVISION
+
+
+def test_alembic_keeps_existing_application_loggers_enabled(tmp_path) -> None:
+    application_logger = logging.getLogger("agent.application.authentication")
+    application_logger.disabled = False
+
+    command.upgrade(_config(tmp_path / "archive-logging.db"), "head")
+
+    assert application_logger.disabled is False
 
 
 def test_archive_upgrade_creates_run_constraints_indexes_and_keeps_holds(
