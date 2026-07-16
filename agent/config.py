@@ -149,6 +149,19 @@ class Settings(BaseSettings):
     search_default_page_size: int = Field(default=50, ge=1, le=200)
     search_max_page_size: int = Field(default=200, ge=1, le=200)
 
+    # Phase 5D.2A: retention planning. Execution is intentionally unsupported.
+    retention_policy_version: str = Field(
+        default="v1",
+        min_length=1,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    retention_canonical_event_days: int = Field(default=30, ge=1, le=36_500)
+    retention_detection_signal_days: int = Field(default=90, ge=1, le=36_500)
+    retention_completed_job_days: int = Field(default=90, ge=1, le=36_500)
+    retention_terminal_incident_days: int = Field(default=365, ge=1, le=36_500)
+    retention_audit_event_days: int = Field(default=365, ge=1, le=36_500)
+
     llm_enabled: bool = True
     llm_provider: Literal["groq"] = "groq"
     llm_model: str = "llama-3.3-70b-versatile"

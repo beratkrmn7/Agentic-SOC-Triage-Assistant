@@ -351,6 +351,42 @@ class Report(Base):
     
     incident = relationship("Incident", back_populates="reports")
 
+
+class RetentionHold(Base):
+    __tablename__ = "retention_holds"
+    __table_args__ = (
+        CheckConstraint(
+            "entity_type IN ('canonical_event', 'detection_signal', "
+            "'ingestion_job', 'incident', 'audit_event')",
+            name="ck_retention_holds_entity_type",
+        ),
+        CheckConstraint(
+            "length(trim(reason)) > 0",
+            name="ck_retention_holds_reason_not_blank",
+        ),
+        CheckConstraint(
+            "expires_at IS NULL OR expires_at > created_at",
+            name="ck_retention_holds_expiry_after_creation",
+        ),
+        Index(
+            "ix_retention_holds_entity_active",
+            "entity_type",
+            "entity_id",
+            "released_at",
+            "expires_at",
+        ),
+        Index("ix_retention_holds_expires_at", "expires_at"),
+    )
+
+    hold_id = Column(String(45), primary_key=True)
+    entity_type = Column(String(32), nullable=False)
+    entity_id = Column(String(128), nullable=False)
+    reason = Column(String(500), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    released_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
     
