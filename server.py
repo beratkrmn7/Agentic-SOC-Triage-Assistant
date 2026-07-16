@@ -24,6 +24,7 @@ from agent.api.v1.incidents import router as v1_incidents_router  # noqa: E402
 from agent.api.v1.jobs import router as v1_jobs_router  # noqa: E402
 from agent.api.health import router as health_router  # noqa: E402
 from agent.api.v1.workers import router as v1_workers_router  # noqa: E402
+from agent.api.v1.search import router as v1_search_router  # noqa: E402
 from agent.api.deps import get_uow, require_permission  # noqa: E402
 from agent.application.authentication import (  # noqa: E402
     AUTHENTICATION_ERROR,
@@ -563,6 +564,7 @@ def create_app(
     application.include_router(health_router, prefix="/health")
     application.include_router(v1_incidents_router, prefix="/api/v1")
     application.include_router(v1_jobs_router, prefix="/api/v1")
+    application.include_router(v1_search_router, prefix="/api/v1")
     application.include_router(
         v1_workers_router,
         prefix="/api/v1/workers",

@@ -758,6 +758,10 @@ EXPECTED_ROUTE_PERMISSIONS = {
     ("GET", "/api/v1/incidents/{incident_id}/timeline"):
         Permission.INCIDENT_AUDIT_READ,
     ("GET", "/api/v1/workers"): Permission.WORKER_READ,
+    ("GET", "/api/v1/search/incidents"): Permission.INCIDENT_READ,
+    ("GET", "/api/v1/search/events"): Permission.INCIDENT_READ,
+    ("GET", "/api/v1/search/signals"): Permission.INCIDENT_READ,
+    ("GET", "/api/v1/search/jobs"): Permission.JOB_READ,
 }
 
 
