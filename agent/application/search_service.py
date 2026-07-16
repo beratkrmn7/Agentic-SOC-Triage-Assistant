@@ -31,9 +31,15 @@ INCIDENT_STATUSES = frozenset(
         "reopened",
     }
 )
-SEVERITIES = frozenset(
-    {"none", "informational", "low", "medium", "high", "critical"}
-)
+SEVERITY_RANKS = {
+    "none": 0,
+    "informational": 1,
+    "low": 2,
+    "medium": 3,
+    "high": 4,
+    "critical": 5,
+}
+SEVERITIES = frozenset(SEVERITY_RANKS)
 JOB_STATUSES = frozenset(
     {
         "pending",
@@ -280,11 +286,15 @@ class SearchCursorCodec:
     @staticmethod
     def _b64decode(value: str) -> bytes:
         padding = "=" * (-len(value) % 4)
-        return base64.b64decode(
+        decoded = base64.b64decode(
             value + padding,
             altchars=b"-_",
             validate=True,
         )
+        canonical = base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii")
+        if not hmac.compare_digest(value, canonical):
+            raise ValueError("noncanonical_cursor_encoding")
+        return decoded
 
     def encode(self, cursor: SearchCursor) -> str:
         payload = json.dumps(
@@ -519,6 +529,13 @@ class SearchService:
                 float(cursor.value) if cursor.value is not None else None,
                 cursor.item_id,
             )
+        elif sort == "severity":
+            if (
+                cursor.value is None
+                or type(cursor.value) is not int
+                or cursor.value not in SEVERITY_RANKS.values()
+            ):
+                raise InvalidSearchCursorError()
         return cursor
 
     def _page(

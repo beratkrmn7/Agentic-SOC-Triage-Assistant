@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from sqlalchemy import Select, and_, exists, func, or_, select
+from sqlalchemy import Select, and_, case, exists, func, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -15,6 +15,7 @@ from agent.application.search_service import (
     JobSearchCriteria,
     JobSearchResult,
     RepositorySearchPage,
+    SEVERITY_RANKS,
     SearchCursor,
     SearchValidationError,
     SignalSearchCriteria,
@@ -34,6 +35,12 @@ from agent.persistence.orm_models import (
 
 
 T = TypeVar("T")
+
+
+def _severity_rank(column: ColumnElement[Any]) -> ColumnElement[int]:
+    return case(SEVERITY_RANKS, value=column, else_=-1)
+
+
 class SqlAlchemySearchRepository:
     """Bounded, allowlist-only structured metadata search."""
 
@@ -199,14 +206,19 @@ class SqlAlchemySearchRepository:
             "created_at": Incident.created_at,
             "first_seen": Incident.first_seen,
             "last_seen": Incident.last_seen,
-            "severity": Incident.severity,
+            "severity": _severity_rank(Incident.severity),
             "confidence": Incident.confidence,
         }
+        sort_column = sort_columns[criteria.sort]
+        sort_key: str = criteria.sort
+        if criteria.sort == "severity":
+            sort_key = "_severity_rank"
+            statement = statement.add_columns(sort_column.label(sort_key))
         return self._execute_page(
             statement,
-            sort_column=sort_columns[criteria.sort],
+            sort_column=sort_column,
             id_column=Incident.incident_id,
-            sort_key=criteria.sort,
+            sort_key=sort_key,
             id_key="incident_id",
             direction=criteria.direction,
             cursor=cursor,
@@ -388,14 +400,19 @@ class SqlAlchemySearchRepository:
             "created_at": DetectionSignal.created_at,
             "first_seen": DetectionSignal.first_seen,
             "last_seen": DetectionSignal.last_seen,
-            "severity": DetectionSignal.severity,
+            "severity": _severity_rank(DetectionSignal.severity),
             "confidence": DetectionSignal.confidence,
         }
+        sort_column = sort_columns[criteria.sort]
+        sort_key: str = criteria.sort
+        if criteria.sort == "severity":
+            sort_key = "_severity_rank"
+            statement = statement.add_columns(sort_column.label(sort_key))
         return self._execute_page(
             statement,
-            sort_column=sort_columns[criteria.sort],
+            sort_column=sort_column,
             id_column=DetectionSignal.signal_id,
-            sort_key=criteria.sort,
+            sort_key=sort_key,
             id_key="signal_id",
             direction=criteria.direction,
             cursor=cursor,
