@@ -34,9 +34,9 @@ from agent.persistence.unit_of_work import UnitOfWork
 
 
 CLEANUP_ENTITY_ORDER: tuple[RetentionEntity, ...] = (
+    "audit_event",
     "incident",
     "ingestion_job",
-    "audit_event",
     "detection_signal",
     "canonical_event",
 )

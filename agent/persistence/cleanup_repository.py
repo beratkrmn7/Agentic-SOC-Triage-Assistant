@@ -366,11 +366,18 @@ class RetentionCleanupRepository:
         if not safe_ids:
             return 0, len(eligible_ids)
         spec = self._retention.candidate_spec(entity_type, cutoffs, as_of)
-        result = cast(CursorResult[Any], self._session.execute(
-            delete(spec.model).where(
-                spec.entity_id_column.in_(safe_ids),
-                spec.candidate,
+        root_delete = delete(spec.model).where(
+            spec.entity_id_column.in_(safe_ids),
+            spec.candidate,
+        )
+        if entity_type == "incident":
+            root_delete = root_delete.where(
+                ~select(AuditEvent.id)
+                .where(AuditEvent.incident_id == spec.entity_id_column)
+                .exists()
             )
+        result = cast(CursorResult[Any], self._session.execute(
+            root_delete
         ))
         if result.rowcount != len(safe_ids):
             raise CleanupPersistenceError("cleanup_root_delete_conflict")
@@ -424,8 +431,16 @@ class RetentionCleanupRepository:
                 )
                 if existing_jobs != linked_job_ids or eligible_jobs != linked_job_ids:
                     continue
-            if authorization.contains_all_dependencies(dependency_keys):
-                safe.add(incident_id)
+            if not authorization.contains_all_dependencies(dependency_keys):
+                continue
+            remaining_audit_event = self._session.scalar(
+                select(AuditEvent.id)
+                .where(AuditEvent.incident_id == incident_id)
+                .limit(1)
+            )
+            if remaining_audit_event is not None:
+                continue
+            safe.add(incident_id)
         return safe
 
     def _safe_jobs(
@@ -638,11 +653,6 @@ class RetentionCleanupRepository:
     def _delete_incident_dependencies(self, incident_ids: set[str]) -> None:
         if not incident_ids:
             return
-        self._session.execute(
-            update(AuditEvent)
-            .where(AuditEvent.incident_id.in_(incident_ids))
-            .values(incident_id=None)
-        )
         self._session.execute(delete(Report).where(Report.incident_id.in_(incident_ids)))
         self._session.execute(
             delete(EvidenceItem).where(EvidenceItem.incident_id.in_(incident_ids))

@@ -46,17 +46,22 @@ same current predicate as retention planning.
 
 The foreign-key-derived root order is:
 
-1. terminal incidents;
-2. completed ingestion jobs;
-3. audit events;
+1. audit events;
+2. terminal incidents;
+3. completed ingestion jobs;
 4. unreferenced detection signals;
 5. unreferenced canonical events.
 
 For incidents and jobs, reports are deleted before evidence, evidence before
-triage runs, and association tables before the root. Incident audit events are
-detached rather than cascade-deleted. Events and signals are deleted only after
-all remaining incident/job associations (and event evidence references) are
-absent. A newly created or unarchived dependency protects its root.
+triage runs, and association tables before the root. Audit-event links are never
+detached to make an incident deletion possible. An incident is eligible for
+deletion only after the audit-event phase and only when no audit event still
+references it. Events and signals are deleted only after all remaining
+incident/job associations (and event evidence references) are absent. A newly
+created or unarchived dependency protects its root. The incident delete also
+has an atomic `NOT EXISTS` audit guard. A concurrent audit insert that lands
+after that statement-level check is left to the database foreign key; any
+collision rolls the batch back rather than weakening the linkage.
 
 ## Batches, lease, resume, and idempotency
 
