@@ -18,6 +18,7 @@ def production_values(**overrides) -> dict:
         "rate_limiting_enabled": True,
         "rate_limit_backend": "redis",
         "rate_limit_key_secret": TEST_RATE_LIMIT_SECRET,
+        "search_cursor_secret": "rate-limit-search-cursor-secret-000001",
     }
     values.update(overrides)
     return values

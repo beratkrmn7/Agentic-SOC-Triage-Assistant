@@ -16,9 +16,12 @@ from agent.persistence.orm_models import Base
 # access to the values within the .ini file in use.
 config = context.config
 
-# Override sqlalchemy.url with our settings
-settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# Explicit Alembic configuration takes precedence. The placeholder in the
+# checked-in ini falls back to application settings for normal CLI use.
+configured_url = config.get_main_option("sqlalchemy.url")
+if not configured_url or configured_url.startswith("driver://"):
+    settings = get_settings()
+    config.set_main_option("sqlalchemy.url", settings.database_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
