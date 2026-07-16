@@ -352,6 +352,46 @@ class Report(Base):
     incident = relationship("Incident", back_populates="reports")
 
 
+class RetentionArchiveRun(Base):
+    __tablename__ = "retention_archive_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('creating', 'completed', 'verified', 'failed')",
+            name="ck_retention_archive_runs_status",
+        ),
+        CheckConstraint(
+            "candidate_record_count >= 0 AND dependency_record_count >= 0 "
+            "AND total_record_count >= 0",
+            name="ck_retention_archive_runs_nonnegative_counts",
+        ),
+        CheckConstraint(
+            "total_record_count = candidate_record_count + dependency_record_count",
+            name="ck_retention_archive_runs_total_count",
+        ),
+        CheckConstraint(
+            "manifest_sha256 IS NULL OR length(manifest_sha256) = 64",
+            name="ck_retention_archive_runs_manifest_sha256",
+        ),
+        Index("ix_retention_archive_runs_status", "status"),
+        Index("ix_retention_archive_runs_archive_as_of", "archive_as_of"),
+    )
+
+    archive_id = Column(String(45), primary_key=True)
+    policy_version = Column(String(32), nullable=False)
+    schema_version = Column(String(64), nullable=False)
+    status = Column(String(16), nullable=False, default="creating")
+    archive_as_of = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    verified_at = Column(DateTime(timezone=True), nullable=True)
+    storage_key = Column(String(64), nullable=False, unique=True)
+    manifest_sha256 = Column(String(64), nullable=True)
+    candidate_record_count = Column(Integer, nullable=False, default=0)
+    dependency_record_count = Column(Integer, nullable=False, default=0)
+    total_record_count = Column(Integer, nullable=False, default=0)
+    sanitized_error_code = Column(String(64), nullable=True)
+
+
 class RetentionHold(Base):
     __tablename__ = "retention_holds"
     __table_args__ = (
