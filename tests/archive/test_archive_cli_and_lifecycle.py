@@ -22,6 +22,28 @@ def _all_cli_text(stdout: StringIO, stderr: StringIO) -> str:
     return f"{stdout.getvalue()}\n{stderr.getvalue()}"
 
 
+def _assert_safe_cli_failure(
+    code: int,
+    stdout: StringIO,
+    stderr: StringIO,
+    *,
+    command: str,
+    sensitive_values: tuple[str, ...],
+) -> None:
+    expected = (
+        "Archive creation failed safely.\n"
+        if command == "create"
+        else "Archive verification failed safely.\n"
+    )
+    assert code != 0
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == expected
+    rendered = _all_cli_text(stdout, stderr)
+    assert "Traceback" not in rendered
+    for sensitive_value in sensitive_values:
+        assert sensitive_value not in rendered
+
+
 def test_archive_create_and_verify_cli_emit_only_safe_summaries(archive_env) -> None:
     seed_archive_graph(archive_env)
     create_stdout = StringIO()
@@ -71,10 +93,23 @@ def test_archive_create_and_verify_cli_emit_only_safe_summaries(archive_env) -> 
 def test_invalid_archive_id_is_rejected_before_settings_or_database(
     monkeypatch,
 ) -> None:
-    def fail_if_called():
+    calls: list[str] = []
+
+    def fail_settings():
+        calls.append("settings")
         raise AssertionError("settings access must not happen")
 
-    monkeypatch.setattr(archive_cli, "get_settings", fail_if_called)
+    def fail_store(*_args, **_kwargs):
+        calls.append("store")
+        raise AssertionError("storage access must not happen")
+
+    def fail_database(*_args, **_kwargs):
+        calls.append("database")
+        raise AssertionError("database access must not happen")
+
+    monkeypatch.setattr(archive_cli, "get_settings", fail_settings)
+    monkeypatch.setattr(archive_cli, "LocalArchiveStore", fail_store)
+    monkeypatch.setattr(archive_cli, "create_engine_factory", fail_database)
     stdout = StringIO()
     stderr = StringIO()
 
@@ -85,8 +120,127 @@ def test_invalid_archive_id_is_rejected_before_settings_or_database(
     )
 
     assert code == 2
+    assert calls == []
     assert stdout.getvalue() == ""
     assert stderr.getvalue() == "Archive verification failed safely.\n"
+
+
+def test_settings_loading_failure_is_sanitized(monkeypatch) -> None:
+    secret = "postgresql://private@db/internal C:/private/archive"
+
+    def fail_settings():
+        raise ValueError(secret)
+
+    monkeypatch.setattr(archive_cli, "get_settings", fail_settings)
+    stdout = StringIO()
+    stderr = StringIO()
+
+    code = archive_cli.main(["create"], stdout=stdout, stderr=stderr)
+
+    _assert_safe_cli_failure(
+        code,
+        stdout,
+        stderr,
+        command="create",
+        sensitive_values=(secret, "postgresql://", "C:/private/archive"),
+    )
+
+
+def test_archive_store_constructor_failure_is_sanitized(
+    archive_env,
+    monkeypatch,
+) -> None:
+    archive_path = "C:/private/retention-archives"
+
+    def fail_store(_archive_root):
+        raise PermissionError(f"permission denied: {archive_path}")
+
+    monkeypatch.setattr(archive_cli, "LocalArchiveStore", fail_store)
+    stdout = StringIO()
+    stderr = StringIO()
+
+    code = archive_cli.main(
+        ["create"],
+        settings=archive_env.settings,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    _assert_safe_cli_failure(
+        code,
+        stdout,
+        stderr,
+        command="create",
+        sensitive_values=(archive_path, "permission denied"),
+    )
+
+
+def test_database_engine_factory_failure_is_sanitized(
+    archive_env,
+    monkeypatch,
+) -> None:
+    database_url = "postgresql://private:secret@db.internal/archive"
+
+    def fail_engine(_settings):
+        raise ValueError(f"invalid database URL: {database_url}")
+
+    monkeypatch.setattr(archive_cli, "create_engine_factory", fail_engine)
+    stdout = StringIO()
+    stderr = StringIO()
+
+    code = archive_cli.main(
+        ["verify", "--archive-id", ARCHIVE_ID],
+        settings=archive_env.settings,
+        store=archive_env.store,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    _assert_safe_cli_failure(
+        code,
+        stdout,
+        stderr,
+        command="verify",
+        sensitive_values=(database_url, "postgresql://", "invalid database URL"),
+    )
+
+
+def test_created_engine_is_disposed_when_later_setup_fails(
+    archive_env,
+    monkeypatch,
+) -> None:
+    class DisposableEngine:
+        disposed = False
+
+        def dispose(self) -> None:
+            self.disposed = True
+
+    engine = DisposableEngine()
+
+    def fail_session_factory(_engine):
+        raise RuntimeError("private session setup failure")
+
+    monkeypatch.setattr(archive_cli, "create_engine_factory", lambda _settings: engine)
+    monkeypatch.setattr(archive_cli, "create_session_factory", fail_session_factory)
+    stdout = StringIO()
+    stderr = StringIO()
+
+    code = archive_cli.main(
+        ["create"],
+        settings=archive_env.settings,
+        store=archive_env.store,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    _assert_safe_cli_failure(
+        code,
+        stdout,
+        stderr,
+        command="create",
+        sensitive_values=("private session setup failure",),
+    )
+    assert engine.disposed is True
 
 
 @pytest.mark.parametrize("known_but_corrupt", [False, True])
