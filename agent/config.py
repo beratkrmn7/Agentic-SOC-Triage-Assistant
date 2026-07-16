@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     rate_limit_prefix: str = "soc-rate-limit"
     rate_limit_fail_closed: bool = True
 
+    # Phase 5D.1: structured database search.
+    search_cursor_secret: SecretStr | None = None
+    search_default_page_size: int = Field(default=50, ge=1, le=200)
+    search_max_page_size: int = Field(default=200, ge=1, le=200)
+
     llm_enabled: bool = True
     llm_provider: Literal["groq"] = "groq"
     llm_model: str = "llama-3.3-70b-versatile"
@@ -245,6 +250,12 @@ class Settings(BaseSettings):
             secret_value = self.rate_limit_key_secret.get_secret_value()
             if len(secret_value.encode("utf-8")) < 32:
                 raise ValueError("rate_limit_key_secret_too_short")
+        if self.search_default_page_size > self.search_max_page_size:
+            raise ValueError("search_default_page_size_exceeds_maximum")
+        if self.search_cursor_secret is not None:
+            cursor_secret = self.search_cursor_secret.get_secret_value()
+            if len(cursor_secret.encode("utf-8")) < 32:
+                raise ValueError("search_cursor_secret_too_short")
 
         if self.app_env == "production":
             if self.auth_mode == "disabled":
@@ -270,6 +281,8 @@ class Settings(BaseSettings):
                 raise ValueError("production_rate_limit_key_secret_required")
             if not self.rate_limit_fail_closed:
                 raise ValueError("production_rate_limit_fail_closed_required")
+            if self.search_cursor_secret is None:
+                raise ValueError("production_search_cursor_secret_required")
 
         if self.auth_mode not in ("oidc", "hybrid"):
             return self
