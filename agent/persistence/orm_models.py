@@ -6,6 +6,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    Index,
     JSON,
     String,
     Table,
@@ -76,6 +77,13 @@ class ApiCredential(Base):
 
 class IngestionJob(Base):
     __tablename__ = "ingestion_jobs"
+    __table_args__ = (
+        Index("ix_ingestion_jobs_created_id", "created_at", "id"),
+        Index("ix_ingestion_jobs_status_created", "status", "created_at"),
+        Index("ix_ingestion_jobs_mode_created", "analysis_mode", "created_at"),
+        Index("ix_ingestion_jobs_completed_id", "completed_at", "id"),
+        Index("ix_ingestion_jobs_source_created", "source_name", "created_at"),
+    )
     
     id = Column(String, primary_key=True)
     idempotency_key = Column(String, unique=True, index=True, nullable=True)
@@ -131,6 +139,12 @@ class IngestionJob(Base):
 
 class CanonicalEvent(Base):
     __tablename__ = "canonical_events"
+    __table_args__ = (
+        Index("ix_canonical_events_timestamp_id", "timestamp", "event_id"),
+        Index("ix_canonical_events_src_timestamp", "src_ip", "timestamp"),
+        Index("ix_canonical_events_dst_timestamp", "dst_ip", "timestamp"),
+        Index("ix_canonical_events_source_timestamp", "source_name", "timestamp"),
+    )
     
     event_id = Column(String, primary_key=True)
     
@@ -156,6 +170,14 @@ class CanonicalEvent(Base):
 
 class DetectionSignal(Base):
     __tablename__ = "detection_signals"
+    __table_args__ = (
+        Index("ix_detection_signals_created_id", "created_at", "signal_id"),
+        Index("ix_detection_signals_rule_created", "rule_id", "created_at"),
+        Index("ix_detection_signals_severity_created", "severity", "created_at"),
+        Index("ix_detection_signals_first_seen_id", "first_seen", "signal_id"),
+        Index("ix_detection_signals_last_seen_id", "last_seen", "signal_id"),
+        Index("ix_detection_signals_suppressed_created", "suppressed", "created_at"),
+    )
     
     signal_id = Column(String, primary_key=True)
     
@@ -184,6 +206,14 @@ class DetectionSignal(Base):
 
 class Incident(Base):
     __tablename__ = "incidents"
+    __table_args__ = (
+        Index("ix_incidents_created_id", "created_at", "incident_id"),
+        Index("ix_incidents_status_created", "status", "created_at"),
+        Index("ix_incidents_severity_created", "severity", "created_at"),
+        Index("ix_incidents_type_created", "incident_type", "created_at"),
+        Index("ix_incidents_first_seen_id", "first_seen", "incident_id"),
+        Index("ix_incidents_last_seen_id", "last_seen", "incident_id"),
+    )
     
     incident_id = Column(String, primary_key=True)
     
