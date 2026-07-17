@@ -212,8 +212,8 @@ class AnalysisService:
                 now_utc = datetime.now(timezone.utc)
                 schema_version = settings.opensearch_schema_version
 
-                event_incident_map = {}
-                signal_incident_map = {}
+                event_incident_map: Dict[str, set[str]] = {}
+                signal_incident_map: Dict[str, set[str]] = {}
 
                 if result.detection_result:
                     for domain_inc in result.detection_result.incidents:
@@ -225,28 +225,28 @@ class AnalysisService:
                 for event in result.event_map.values():
                     orm_event = uow.canonical_events.get(event.event_id)
                     if orm_event:
-                        doc = canonical_event_document(
+                        event_doc = canonical_event_document(
                             orm_event,
                             schema_version=schema_version,
                             indexed_at=now_utc,
-                            job_ids=(job.id,) if job else (),
+                            job_ids=(str(job.id),) if job else (),
                             incident_ids=tuple(event_incident_map.get(event.event_id, set())),
                             context_incident_ids=(),
                         )
-                        uow.search_index_outbox.enqueue_upsert(doc)
+                        uow.search_index_outbox.enqueue_upsert(event_doc)
 
                 if result.detection_result:
                     for signal in result.detection_result.signals:
                         orm_signal = uow.detection_signals.get(signal.signal_id)
                         if orm_signal:
-                            doc = detection_signal_document(
+                            signal_doc = detection_signal_document(
                                 orm_signal,
                                 schema_version=schema_version,
                                 indexed_at=now_utc,
-                                job_ids=(job.id,) if job else (),
+                                job_ids=(str(job.id),) if job else (),
                                 incident_ids=tuple(signal_incident_map.get(signal.signal_id, set())),
                             )
-                            uow.search_index_outbox.enqueue_upsert(doc)
+                            uow.search_index_outbox.enqueue_upsert(signal_doc)
 
                     for inc_state in result.incidents:
                         incident_id = inc_state.get("incident_id")
@@ -256,15 +256,15 @@ class AnalysisService:
                         if orm_inc:
                             has_report = bool(inc_state.get("final_report"))
                             has_val_ev = bool(inc_state.get("validated_evidence"))
-                            doc = incident_document(
+                            incident_doc = incident_document(
                                 orm_inc,
                                 schema_version=schema_version,
                                 indexed_at=now_utc,
-                                job_ids=(job.id,) if job else (),
+                                job_ids=(str(job.id),) if job else (),
                                 has_report=has_report,
                                 has_validated_evidence=has_val_ev
                             )
-                            uow.search_index_outbox.enqueue_upsert(doc)
+                            uow.search_index_outbox.enqueue_upsert(incident_doc)
                             
             # 8. Complete only if the database still grants this processing lease.
             # This conditional update is the final cancellation-vs-completion arbiter.
