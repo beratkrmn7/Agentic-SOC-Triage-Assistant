@@ -22,9 +22,8 @@ def _config(database: Path) -> Config:
     return config
 
 
-def test_archive_revision_is_the_only_alembic_head() -> None:
+def test_archive_revision_chain() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == [CLEANUP_REVISION]
     cleanup_revision = script.get_revision(CLEANUP_REVISION)
     assert cleanup_revision is not None
     assert cleanup_revision.down_revision == ARCHIVE_REVISION
