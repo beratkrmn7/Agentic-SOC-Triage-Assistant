@@ -331,6 +331,19 @@ def calculate_payload_sha256(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(canonical_payload_bytes(payload)).hexdigest()
 
 
+def projection_fingerprint_source(document: SearchDocument) -> dict[str, object]:
+    """Return only the safe logical projection fields used for versioning."""
+    payload = search_document_payload(document)
+    payload.pop("document_version", None)
+    payload.pop("indexed_at", None)
+    return payload
+
+
+def calculate_projection_sha256(document: SearchDocument) -> str:
+    """Fingerprint a safe projection without delivery or version metadata."""
+    return calculate_payload_sha256(projection_fingerprint_source(document))
+
+
 def validate_search_document(payload: Mapping[str, object]) -> SearchDocument:
     """Validate a database JSON payload as one of the safe search documents."""
     return _SEARCH_DOCUMENT_ADAPTER.validate_python(dict(payload))

@@ -11,6 +11,7 @@ from sqlalchemy import JSON, MetaData, Table, create_engine, inspect
 from sqlalchemy.exc import IntegrityError
 
 
+PROJECTION_REVISION = "7b9c2e4f6a81"
 OUTBOX_REVISION = "02a14b4d18bf"
 PREVIOUS_REVISION = "5d2c9a7e4b10"
 PREVIOUS_TABLES = {
@@ -51,12 +52,31 @@ def _outbox_values(**overrides: object) -> dict[str, object]:
     return values
 
 
-def test_outbox_revision_is_the_only_head_and_follows_cleanup() -> None:
+def _projection_values(**overrides: object) -> dict[str, object]:
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    values: dict[str, object] = {
+        "entity_type": "canonical_event",
+        "entity_id": "event-1",
+        "schema_version": "v1",
+        "projection_version": 1,
+        "projection_sha256": "a" * 64,
+        "created_at": now,
+        "updated_at": now,
+        "version": 1,
+    }
+    values.update(overrides)
+    return values
+
+
+def test_projection_revision_is_the_only_head_and_follows_outbox() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == [OUTBOX_REVISION]
-    revision = script.get_revision(OUTBOX_REVISION)
-    assert revision is not None
-    assert revision.down_revision == PREVIOUS_REVISION
+    assert script.get_heads() == [PROJECTION_REVISION]
+    projection_revision = script.get_revision(PROJECTION_REVISION)
+    assert projection_revision is not None
+    assert projection_revision.down_revision == OUTBOX_REVISION
+    outbox_revision = script.get_revision(OUTBOX_REVISION)
+    assert outbox_revision is not None
+    assert outbox_revision.down_revision == PREVIOUS_REVISION
 
 
 def test_empty_database_upgrade_creates_constraints_indexes_and_keeps_retention(
@@ -69,13 +89,28 @@ def test_empty_database_upgrade_creates_constraints_indexes_and_keeps_retention(
         inspector = inspect(engine)
         tables = set(inspector.get_table_names())
         assert "search_index_outbox" in tables
+        assert "search_projection_states" in tables
         assert PREVIOUS_TABLES <= tables
-        assert {
-            index["name"] for index in inspector.get_indexes("search_index_outbox")
-        } == {
+        assert {index["name"] for index in inspector.get_indexes("search_index_outbox")} == {
             "ix_search_index_outbox_entity_lookup",
             "ix_search_index_outbox_lease_expires",
             "ix_search_index_outbox_status_available",
+        }
+        assert inspector.get_indexes("search_projection_states") == []
+        assert inspector.get_pk_constraint("search_projection_states")["constrained_columns"] == [
+            "entity_type",
+            "entity_id",
+            "schema_version",
+        ]
+        assert {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("search_projection_states")
+        } == {
+            "ck_search_projection_states_entity_type",
+            "ck_search_projection_states_projection_version",
+            "ck_search_projection_states_schema_version",
+            "ck_search_projection_states_sha256",
+            "ck_search_projection_states_version",
         }
         assert {
             constraint["name"]
@@ -118,8 +153,41 @@ def test_empty_database_upgrade_creates_constraints_indexes_and_keeps_retention(
         with engine.begin() as connection:
             with pytest.raises(IntegrityError):
                 connection.execute(
-                    outbox.insert().values(
-                        **_outbox_values(outbox_id="outbox-duplicate")
+                    outbox.insert().values(**_outbox_values(outbox_id="outbox-duplicate"))
+                )
+
+        projection_state = Table(
+            "search_projection_states",
+            metadata,
+            autoload_with=engine,
+        )
+        invalid_projection_values = [
+            {"entity_type": "incident"},
+            {"schema_version": "   "},
+            {"projection_version": 0},
+            {"projection_sha256": "g" * 64},
+            {"projection_sha256": "A" * 64},
+            {"version": 0},
+        ]
+        for index, overrides in enumerate(invalid_projection_values, start=1):
+            with engine.begin() as connection:
+                with pytest.raises(IntegrityError):
+                    connection.execute(
+                        projection_state.insert().values(
+                            **_projection_values(
+                                entity_id=f"invalid-projection-{index}",
+                                **overrides,
+                            )
+                        )
+                    )
+
+        with engine.begin() as connection:
+            connection.execute(projection_state.insert().values(**_projection_values()))
+        with engine.begin() as connection:
+            with pytest.raises(IntegrityError):
+                connection.execute(
+                    projection_state.insert().values(
+                        **_projection_values(projection_sha256="b" * 64)
                     )
                 )
     finally:
@@ -132,11 +200,22 @@ def test_upgrade_downgrade_upgrade_round_trip_preserves_previous_tables(
     database = tmp_path / "outbox-round-trip.db"
     config = _config(database)
     command.upgrade(config, "head")
-    command.downgrade(config, PREVIOUS_REVISION)
+    command.downgrade(config, OUTBOX_REVISION)
 
     engine = create_engine(f"sqlite:///{database}")
     try:
         tables = set(inspect(engine).get_table_names())
+        assert "search_projection_states" not in tables
+        assert "search_index_outbox" in tables
+        assert PREVIOUS_TABLES <= tables
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, PREVIOUS_REVISION)
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        tables = set(inspect(engine).get_table_names())
+        assert "search_projection_states" not in tables
         assert "search_index_outbox" not in tables
         assert PREVIOUS_TABLES <= tables
     finally:
@@ -147,6 +226,7 @@ def test_upgrade_downgrade_upgrade_round_trip_preserves_previous_tables(
     try:
         tables = set(inspect(engine).get_table_names())
         assert "search_index_outbox" in tables
+        assert "search_projection_states" in tables
         assert PREVIOUS_TABLES <= tables
     finally:
         engine.dispose()

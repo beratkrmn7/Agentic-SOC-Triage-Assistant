@@ -570,6 +570,53 @@ class WorkerHeartbeat(Base):
     created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False)
 
+class SearchProjectionState(Base):
+    __tablename__ = "search_projection_states"
+    __table_args__ = (
+        CheckConstraint(
+            "entity_type IN ('canonical_event', 'detection_signal')",
+            name="ck_search_projection_states_entity_type",
+        ),
+        CheckConstraint(
+            "length(trim(schema_version)) > 0",
+            name="ck_search_projection_states_schema_version",
+        ),
+        CheckConstraint(
+            "projection_version > 0",
+            name="ck_search_projection_states_projection_version",
+        ),
+        CheckConstraint(
+            "version > 0",
+            name="ck_search_projection_states_version",
+        ),
+        CheckConstraint(
+            "length(projection_sha256) = 64 AND "
+            "length(replace(replace(replace(replace(replace(replace(replace("
+            "replace(replace(replace(replace(replace(replace(replace(replace("
+            "replace(projection_sha256, '0', ''), '1', ''), '2', ''), '3', ''), "
+            "'4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', ''), "
+            "'a', ''), 'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '')) = 0",
+            name="ck_search_projection_states_sha256",
+        ),
+    )
+
+    entity_type = Column(String(32), primary_key=True)
+    entity_id = Column(String(256), primary_key=True)
+    schema_version = Column(String(64), primary_key=True)
+    projection_version = Column(Integer, nullable=False)
+    projection_sha256 = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        onupdate=func.now(),
+    )
+    version = Column(Integer, nullable=False, default=1)
+
+    __mapper_args__ = {"version_id_col": version}
+
+
 class SearchIndexOutbox(Base):
     __tablename__ = "search_index_outbox"
     __table_args__ = (

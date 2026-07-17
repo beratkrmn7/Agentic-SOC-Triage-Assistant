@@ -23,6 +23,7 @@ from agent.persistence.orm_models import (
     CanonicalEvent,
     IngestionJob,
     SearchIndexOutbox,
+    SearchProjectionState,
     ingestion_job_events,
 )
 from agent.persistence.outbox_repository import OutboxError
@@ -49,7 +50,7 @@ def database():
     engine.dispose()
 
 
-def _counts(factory) -> tuple[int, int, int, int]:
+def _counts(factory) -> tuple[int, int, int, int, int]:
     with factory() as session:
         return (
             session.execute(select(func.count()).select_from(IngestionJob)).scalar_one(),
@@ -59,6 +60,9 @@ def _counts(factory) -> tuple[int, int, int, int]:
             ).scalar_one(),
             session.execute(
                 select(func.count()).select_from(SearchIndexOutbox)
+            ).scalar_one(),
+            session.execute(
+                select(func.count()).select_from(SearchProjectionState)
             ).scalar_one(),
         )
 
@@ -82,7 +86,7 @@ def test_source_and_association_roll_back_when_outbox_enqueue_fails(database) ->
                 uow.settings,
             ).enqueue_analysis(events=[source], signals=[], incidents=[])
 
-    assert _counts(database) == (0, 0, 0, 0)
+    assert _counts(database) == (0, 0, 0, 0, 0)
 
 
 def test_outbox_and_source_roll_back_when_later_transaction_step_fails(database) -> None:
@@ -101,7 +105,7 @@ def test_outbox_and_source_roll_back_when_later_transaction_step_fails(database)
             ).enqueue_analysis(events=[source], signals=[], incidents=[])
             raise RuntimeError("later_source_failure")
 
-    assert _counts(database) == (0, 0, 0, 0)
+    assert _counts(database) == (0, 0, 0, 0, 0)
 
 
 def test_cancellation_completion_race_rolls_back_source_and_outbox(database) -> None:
@@ -144,7 +148,7 @@ def test_cancellation_completion_race_rolls_back_source_and_outbox(database) -> 
     with pytest.raises(JobCancellationRequested):
         AnalysisService(uow=uow)._persist_analysis(result, run_triage=False)
 
-    assert _counts(database) == (1, 0, 0, 0)
+    assert _counts(database) == (1, 0, 0, 0, 0)
     with database() as session:
         assert session.get(IngestionJob, "job-cancelled").status == "cancelled"
 

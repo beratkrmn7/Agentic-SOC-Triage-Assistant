@@ -5,11 +5,11 @@ from itertools import islice
 from typing import TypeVar
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from agent.config import Settings
 from agent.opensearch.documents import (
-    SearchDocument,
     canonical_event_document,
     detection_signal_document,
     incident_document,
@@ -27,8 +27,13 @@ from agent.persistence.orm_models import (
     ingestion_job_signals,
 )
 from agent.persistence.outbox_repository import (
+    OutboxError,
     OutboxEnqueueSummary,
     SearchIndexOutboxRepository,
+)
+from agent.persistence.projection_repository import (
+    ProjectionDocument,
+    SearchProjectionStateRepository,
 )
 
 
@@ -71,6 +76,7 @@ class SearchOutboxService:
         self.repository = repository
         self.settings = settings
         self.chunk_size = settings.opensearch_outbox_enqueue_chunk_size
+        self.projection_states = SearchProjectionStateRepository(session)
 
     @property
     def enabled(self) -> bool:
@@ -98,6 +104,21 @@ class SearchOutboxService:
             return OutboxEnqueueSummary()
         self.session.flush()
         return self._enqueue_incidents(incidents)
+
+    def _enqueue_projection_documents(
+        self,
+        documents: list[ProjectionDocument],
+    ) -> OutboxEnqueueSummary:
+        try:
+            versioned = self.projection_states.resolve_documents(documents)
+            return self.repository.enqueue_many_upserts(
+                versioned,
+                chunk_size=self.chunk_size,
+            )
+        except OperationalError:
+            # A file-backed SQLite writer race is retried at the UnitOfWork
+            # boundary; never leak driver details or roll back from here.
+            raise OutboxError("opensearch_projection_state_retry") from None
 
     def _enqueue_events(
         self,
@@ -127,20 +148,16 @@ class SearchOutboxService:
                 target = context_incident_ids if is_context else incident_ids
                 _add(target, event_id, incident_id)
 
-            documents: list[SearchDocument] = []
+            documents: list[ProjectionDocument] = []
             for row in rows:
                 event_id = str(row.event_id)
                 jobs = job_ids.get(event_id, set())
                 incidents = incident_ids.get(event_id, set())
                 context_incidents = context_incident_ids.get(event_id, set())
-                projection_version = (
-                    1 + len(jobs) + len(incidents) + len(context_incidents)
-                )
                 documents.append(
                     canonical_event_document(
                         row,
                         schema_version=self.settings.opensearch_schema_version,
-                        document_version=projection_version,
                         job_ids=tuple(sorted(jobs)),
                         incident_ids=tuple(sorted(incidents)),
                         context_incident_ids=tuple(sorted(context_incidents)),
@@ -148,10 +165,7 @@ class SearchOutboxService:
                 )
             summary = _merge_summaries(
                 summary,
-                self.repository.enqueue_many_upserts(
-                    documents,
-                    chunk_size=self.chunk_size,
-                ),
+                self._enqueue_projection_documents(documents),
             )
         return summary
 
@@ -180,7 +194,7 @@ class SearchOutboxService:
             ):
                 _add(incident_ids, signal_id, incident_id)
 
-            documents: list[SearchDocument] = []
+            documents: list[ProjectionDocument] = []
             for row in rows:
                 signal_id = str(row.signal_id)
                 jobs = job_ids.get(signal_id, set())
@@ -189,17 +203,13 @@ class SearchOutboxService:
                     detection_signal_document(
                         row,
                         schema_version=self.settings.opensearch_schema_version,
-                        document_version=1 + len(jobs) + len(incidents),
                         job_ids=tuple(sorted(jobs)),
                         incident_ids=tuple(sorted(incidents)),
                     )
                 )
             summary = _merge_summaries(
                 summary,
-                self.repository.enqueue_many_upserts(
-                    documents,
-                    chunk_size=self.chunk_size,
-                ),
+                self._enqueue_projection_documents(documents),
             )
         return summary
 

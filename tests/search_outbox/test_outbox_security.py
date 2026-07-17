@@ -21,8 +21,10 @@ from agent.persistence.orm_models import (
     DetectionSignal,
     Incident,
     SearchIndexOutbox,
+    SearchProjectionState,
 )
 from agent.persistence.outbox_repository import OutboxError, SearchIndexOutboxRepository
+from agent.persistence.projection_repository import SearchProjectionStateRepository
 from server import global_exception_handler
 
 
@@ -86,12 +88,14 @@ def test_payload_metadata_logs_api_errors_and_audit_events_exclude_secrets(
         created_at=NOW,
         updated_at=NOW,
     )
-    repository.enqueue_many_upserts(
+    versioned = SearchProjectionStateRepository(session).resolve_documents(
         [
             canonical_event_document(event_row, schema_version="v1"),
             detection_signal_document(signal_row, schema_version="v1"),
-            incident_document(incident_row, schema_version="v1"),
         ]
+    )
+    repository.enqueue_many_upserts(
+        [*versioned, incident_document(incident_row, schema_version="v1")]
     )
     session.commit()
 
@@ -111,6 +115,22 @@ def test_payload_metadata_logs_api_errors_and_audit_events_exclude_secrets(
     for marker in SECRET_MARKERS:
         assert marker.lower() not in lowered
     assert all(row.last_error_code is None for row in rows)
+    states = session.execute(select(SearchProjectionState)).scalars().all()
+    serialized_states = json.dumps(
+        [
+            {
+                "entity_type": state.entity_type,
+                "entity_id": state.entity_id,
+                "schema_version": state.schema_version,
+                "projection_sha256": state.projection_sha256,
+            }
+            for state in states
+        ],
+        sort_keys=True,
+    ).lower()
+    assert len(states) == 2
+    for marker in SECRET_MARKERS:
+        assert marker.lower() not in serialized_states
     assert session.execute(select(func.count()).select_from(AuditEvent)).scalar_one() == 0
 
     secret_exception = OutboxError("opensearch_outbox_payload_too_large")
