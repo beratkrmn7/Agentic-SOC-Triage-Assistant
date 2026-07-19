@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from agent.detection.config import DetectionSettings
 from agent.detection.contracts import (
     DetectionRuleMetadata,
+    DetectionSignalVariant,
     RuleContractError,
     event_has_required_fields,
     select_rule_events,
@@ -13,6 +14,7 @@ from agent.detection.contracts import (
 )
 from agent.detection.detectors import register_default_rules
 from agent.detection.detectors.base import BaseDetectionRule
+from agent.detection.detectors.remote_service_probe import RemoteServiceProbeRule
 from agent.detection.models import DetectionEvidence, DetectionSignal
 from agent.detection.registry import default_registry
 from agent.schema import CanonicalLogEvent
@@ -29,6 +31,7 @@ def make_metadata(**overrides: object) -> DetectionRuleMetadata:
         "supported_event_types": (),
         "required_fields": (),
         "signal_type": "contract_signal",
+        "signal_variants": (),
         "default_severity": "low",
         "mitre_techniques": (),
         "window_setting": None,
@@ -126,12 +129,55 @@ def test_valid_signal_contract_passes() -> None:
     validate_signal_contract(make_signal(), ContractRule(), {"event-1"})
 
 
+def test_signal_variants_are_immutable_deterministic_and_duplicate_free() -> None:
+    ssh = DetectionSignalVariant(
+        rule_id="ssh_probe",
+        rule_name="SSH Probe",
+        signal_type="ssh_probe",
+    )
+    rdp = DetectionSignalVariant(
+        rule_id="rdp_probe",
+        rule_name="RDP Probe",
+        signal_type="rdp_probe",
+    )
+
+    metadata = make_metadata(signal_variants=(ssh, rdp))
+
+    assert metadata.signal_variants == (rdp, ssh)
+    with pytest.raises(ValidationError, match="duplicate-free"):
+        make_metadata(signal_variants=(rdp, rdp))
+
+
+def test_undeclared_remote_service_variant_is_rejected() -> None:
+    rule = RemoteServiceProbeRule()
+    signal = make_signal(
+        rule_id="telnet_probe",
+        rule_name="TELNET Probe",
+        signal_type="telnet_probe",
+        signal_family=rule.family,
+    )
+
+    with pytest.raises(RuleContractError, match="undeclared_signal_variant"):
+        validate_signal_contract(signal, rule, {"event-1"})
+
+
+def test_rule_without_signal_variants_remains_strict() -> None:
+    assert ContractRule.metadata.signal_variants == ()
+    with pytest.raises(RuleContractError, match="signal_type_mismatch"):
+        validate_signal_contract(
+            make_signal(signal_type="another_signal"),
+            ContractRule(),
+            {"event-1"},
+        )
+
+
 @pytest.mark.parametrize(
     ("overrides", "category"),
     [
         ({"rule_id": "another_rule"}, "rule_id_mismatch"),
         ({"rule_version": "2.0.0"}, "rule_version_mismatch"),
         ({"rule_name": "Another Rule"}, "rule_name_mismatch"),
+        ({"signal_type": "another_signal"}, "signal_type_mismatch"),
         ({"event_ids": ["foreign"]}, "foreign_event_id"),
         ({"event_ids": []}, "empty_event_ids"),
     ],

@@ -45,7 +45,7 @@ class ExampleRule(BaseDetectionRule):
 
 Registration validates the complete contract. Re-registering the same class, version, and metadata is an idempotent no-op; the same `rule_id` with another class, version, or incompatible metadata is rejected. Rules are always evaluated by ascending `(priority, rule_id)`.
 
-Every emitted signal must match the producing rule's identity, version, name, family, and `signal_type`; have a non-empty primary entity and event set; reference only events supplied to that rule; and keep every evidence event inside the signal event set. Invalid signals are excluded with a bounded warning, while other rules continue. Generate signal IDs from stable inputs with `generate_signal_id`; never use current time or unordered runtime data.
+Every emitted signal must match the producing rule's identity, version, name, family, and `signal_type`. A rule that intentionally preserves multiple legacy signal identities may declare an immutable `signal_variants` tuple; each emitted `(rule_id, rule_name, signal_type)` must then exactly match one declared variant, while version and family still match the parent rule metadata. Signals must also have a non-empty primary entity and event set, reference only events supplied to that rule, and keep every evidence event inside the signal event set. Invalid signals are excluded with a bounded warning, while other rules continue. Generate signal IDs from stable inputs with `generate_signal_id`; never use current time or unordered runtime data.
 
 Rule tests should include positive, negative, and threshold-boundary cases, deterministic repeated evaluation, evidence ownership, and duplicate-signal checks. Detection and ingestion rules must remain completely local and make zero provider or agent calls.
 

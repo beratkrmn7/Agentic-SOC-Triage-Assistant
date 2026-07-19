@@ -7,7 +7,7 @@ from agent.detection.detectors.base import BaseDetectionRule, DetectionContext
 from agent.detection.evidence import select_representative_evidence
 from agent.detection.correlation import sliding_window_scan
 from agent.detection.scoring import calculate_signal_confidence
-from agent.detection.contracts import DetectionRuleMetadata
+from agent.detection.contracts import DetectionRuleMetadata, DetectionSignalVariant
 
 class RemoteServiceProbeRule(BaseDetectionRule):
     metadata = DetectionRuleMetadata(
@@ -19,6 +19,18 @@ class RemoteServiceProbeRule(BaseDetectionRule):
         supported_event_types=(),
         required_fields=("src_ip", "dst_port", "protocol"),
         signal_type="remote_service_probe",
+        signal_variants=(
+            DetectionSignalVariant(
+                rule_id="rdp_probe",
+                rule_name="RDP Probe",
+                signal_type="rdp_probe",
+            ),
+            DetectionSignalVariant(
+                rule_id="ssh_probe",
+                rule_name="SSH Probe",
+                signal_type="ssh_probe",
+            ),
+        ),
         default_severity="high",
         mitre_techniques=("T1046",),
         window_setting="REMOTE_SERVICE_WINDOW_SECONDS",
@@ -104,10 +116,10 @@ class RemoteServiceProbeRule(BaseDetectionRule):
                 
                 signal = DetectionSignal(
                     signal_id=sig_id,
-                    rule_id=self.rule_id,
+                    rule_id=f"{svc_type}_probe",
                     rule_version=self.version,
-                    rule_name=self.name,
-                    signal_type=self.metadata.signal_type,
+                    rule_name=f"{svc_type.upper()} Probe",
+                    signal_type=f"{svc_type}_probe",
                     signal_family=self.family,
                     severity="high",
                     confidence=confidence,
