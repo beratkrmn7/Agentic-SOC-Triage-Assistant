@@ -74,6 +74,24 @@ or LLMs.
 | `multi_service_sweep` | `multi_service_sweep` | `service_probing` | source across service categories | `MULTI_SERVICE_SWEEP_WINDOW_SECONDS` | Batch-local |
 | `scan_followed_by_allowed_connection` | `scan_followed_by_allowed_connection` | `network_intrusion_candidate` | source plus related target/service sequence | `SCAN_THEN_ALLOWED_WINDOW_SECONDS` | Batch-local |
 
+## Phase 6B.2 Remote Service Probe Pack
+
+The registered rules below correlate repeated blocked TCP SYN attempts from one source
+against multiple targets for one service profile. They use only the current
+`DetectionEngine.analyze()` batch. Network probing is not proof of successful
+authentication, exploitation, compromise, or remote execution.
+
+| Registered rule ID | Emitted signal identities | Ports | Family | Severity | Grouping | Thresholds | Scope |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `smb_probe` | `smb_probe` | 139, 445 | `service_probing` | high | source + SMB profile | `EXTENDED_SERVICE_PROBE_*` | Batch-local |
+| `vnc_probe` | `vnc_probe` | 5900–5905 | `service_probing` | high | source + VNC profile | `EXTENDED_SERVICE_PROBE_*` | Batch-local |
+| `winrm_probe` | `winrm_probe` | 5985, 5986 | `service_probing` | high | source + WinRM profile | `EXTENDED_SERVICE_PROBE_*` | Batch-local |
+| `database_service_probe` | `mssql_probe`, `oracle_probe`, `mysql_probe`, `postgresql_probe`, `redis_probe`, `elasticsearch_probe`, `mongodb_probe` | 1433, 1521, 3306, 5432, 6379, 9200, 27017 | `service_probing` | high | source + database profile | `EXTENDED_SERVICE_PROBE_*` | Batch-local |
+| `kubernetes_service_probe` | `kubernetes_api_probe`, `kubelet_probe` | 6443, 10250 | `service_probing` | high | source + Kubernetes profile | `EXTENDED_SERVICE_PROBE_*` | Batch-local |
+| `docker_daemon_probe` | `docker_daemon_probe` | 2375, 2376 | `service_probing` | high | source + Docker profile | `EXTENDED_SERVICE_PROBE_*` | Batch-local |
+| `web_admin_panel_probe` | `web_admin_panel_probe` | 8000, 8080, 8443, 8888, 9000, 9443, 10000 | `service_probing` | medium | source + web-admin profile | common window + `WEB_ADMIN_PROBE_*` | Batch-local |
+| `legacy_cleartext_service_probe` | `telnet_probe`, `ftp_probe` | 23; 20, 21 | `service_probing` | medium | source + cleartext-service profile | `EXTENDED_SERVICE_PROBE_*` | Batch-local |
+
 ## Determinism
 
 Incidents and signals use a deterministic hashing mechanism (`generate_signal_id`, `generate_incident_id`) based on entities, temporal bounds, and correlated events. This ensures that processing the exact same batch of logs repeatedly produces exactly the same incidents.

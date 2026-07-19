@@ -25,6 +25,16 @@ def register_default_rules():
         MultiServiceSweepRule,
     )
     from agent.detection.detectors.subnet_sweep import SubnetSweepRule
+    from agent.detection.detectors.extended_service_probe import (
+        DatabaseServiceProbeRule,
+        DockerDaemonProbeRule,
+        KubernetesServiceProbeRule,
+        LegacyCleartextServiceProbeRule,
+        SmbProbeRule,
+        VncProbeRule,
+        WebAdminPanelProbeRule,
+        WinRmProbeRule,
+    )
 
     # Register rules
     default_registry.register(HorizontalScanRule())
@@ -40,3 +50,11 @@ def register_default_rules():
     default_registry.register(DistributedScanRule())
     default_registry.register(MultiServiceSweepRule())
     default_registry.register(ScanFollowedByAllowedConnectionRule())
+    default_registry.register(SmbProbeRule())
+    default_registry.register(VncProbeRule())
+    default_registry.register(WinRmProbeRule())
+    default_registry.register(DatabaseServiceProbeRule())
+    default_registry.register(KubernetesServiceProbeRule())
+    default_registry.register(DockerDaemonProbeRule())
+    default_registry.register(WebAdminPanelProbeRule())
+    default_registry.register(LegacyCleartextServiceProbeRule())
