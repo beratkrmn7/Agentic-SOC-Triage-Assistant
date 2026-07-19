@@ -14,7 +14,8 @@ def test_rdp_probe():
     ]
     signals = rule.evaluate(events, ctx)
     assert len(signals) == 1
-    assert signals[0].signal_type == "rdp_probe"
+    assert signals[0].signal_type == "remote_service_probe"
+    assert signals[0].rule_id == "remote_service_probe"
     
 def test_ssh_probe():
     rule = RemoteServiceProbeRule()
@@ -26,4 +27,5 @@ def test_ssh_probe():
     ]
     signals = rule.evaluate(events, ctx)
     assert len(signals) == 1
-    assert signals[0].signal_type == "ssh_probe"
+    assert signals[0].signal_type == "remote_service_probe"
+    assert signals[0].rule_id == "remote_service_probe"

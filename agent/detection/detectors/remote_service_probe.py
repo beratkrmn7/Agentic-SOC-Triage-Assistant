@@ -7,13 +7,23 @@ from agent.detection.detectors.base import BaseDetectionRule, DetectionContext
 from agent.detection.evidence import select_representative_evidence
 from agent.detection.correlation import sliding_window_scan
 from agent.detection.scoring import calculate_signal_confidence
+from agent.detection.contracts import DetectionRuleMetadata
 
 class RemoteServiceProbeRule(BaseDetectionRule):
-    rule_id = "remote_service_probe"
-    version = "1.0.0"
-    name = "Remote Service Probe (RDP/SSH)"
-    family = "service_probing"
-    priority = 50 # Higher priority than generic horizontal scan, so it can absorb them
+    metadata = DetectionRuleMetadata(
+        rule_id="remote_service_probe",
+        version="1.0.0",
+        name="Remote Service Probe (RDP/SSH)",
+        family="service_probing",
+        priority=50,
+        supported_event_types=(),
+        required_fields=("src_ip", "dst_port", "protocol"),
+        signal_type="remote_service_probe",
+        default_severity="high",
+        mitre_techniques=("T1046",),
+        window_setting="REMOTE_SERVICE_WINDOW_SECONDS",
+        minimum_events_setting="REMOTE_SERVICE_MIN_EVENTS",
+    )
 
     def evaluate(self, events: Sequence[CanonicalLogEvent], context: DetectionContext) -> List[DetectionSignal]:
         settings = context.settings
@@ -94,10 +104,10 @@ class RemoteServiceProbeRule(BaseDetectionRule):
                 
                 signal = DetectionSignal(
                     signal_id=sig_id,
-                    rule_id=f"{svc_type}_probe", # Specific rule ID per service for easier downstream use
+                    rule_id=self.rule_id,
                     rule_version=self.version,
-                    rule_name=f"{svc_type.upper()} Probe",
-                    signal_type=f"{svc_type}_probe",
+                    rule_name=self.name,
+                    signal_type=self.metadata.signal_type,
                     signal_family=self.family,
                     severity="high",
                     confidence=confidence,
