@@ -49,6 +49,45 @@ class DetectionSettings(BaseModel):
     REMOTE_SERVICE_MIN_BLOCK_RATIO: float = float(os.getenv("REMOTE_SERVICE_MIN_BLOCK_RATIO", "0.60"))
     REMOTE_SERVICE_MIN_SYN_RATIO: float = float(os.getenv("REMOTE_SERVICE_MIN_SYN_RATIO", "0.50"))
 
+    # Extended Remote Service Probe Pack
+    EXTENDED_SERVICE_PROBE_WINDOW_SECONDS: int = Field(
+        default=int(os.getenv("EXTENDED_SERVICE_PROBE_WINDOW_SECONDS", "300")), gt=0
+    )
+    EXTENDED_SERVICE_PROBE_MIN_EVENTS: int = Field(
+        default=int(os.getenv("EXTENDED_SERVICE_PROBE_MIN_EVENTS", "5")), gt=0
+    )
+    EXTENDED_SERVICE_PROBE_MIN_DISTINCT_TARGETS: int = Field(
+        default=int(os.getenv("EXTENDED_SERVICE_PROBE_MIN_DISTINCT_TARGETS", "3")),
+        gt=0,
+    )
+    EXTENDED_SERVICE_PROBE_MIN_BLOCK_RATIO: float = Field(
+        default=float(os.getenv("EXTENDED_SERVICE_PROBE_MIN_BLOCK_RATIO", "0.60")),
+        ge=0.0,
+        le=1.0,
+    )
+    EXTENDED_SERVICE_PROBE_MIN_SYN_RATIO: float = Field(
+        default=float(os.getenv("EXTENDED_SERVICE_PROBE_MIN_SYN_RATIO", "0.50")),
+        ge=0.0,
+        le=1.0,
+    )
+    WEB_ADMIN_PROBE_MIN_EVENTS: int = Field(
+        default=int(os.getenv("WEB_ADMIN_PROBE_MIN_EVENTS", "8")), gt=0
+    )
+    WEB_ADMIN_PROBE_MIN_DISTINCT_TARGETS: int = Field(
+        default=int(os.getenv("WEB_ADMIN_PROBE_MIN_DISTINCT_TARGETS", "5")),
+        gt=0,
+    )
+    WEB_ADMIN_PROBE_MIN_BLOCK_RATIO: float = Field(
+        default=float(os.getenv("WEB_ADMIN_PROBE_MIN_BLOCK_RATIO", "0.80")),
+        ge=0.0,
+        le=1.0,
+    )
+    WEB_ADMIN_PROBE_MIN_SYN_RATIO: float = Field(
+        default=float(os.getenv("WEB_ADMIN_PROBE_MIN_SYN_RATIO", "0.60")),
+        ge=0.0,
+        le=1.0,
+    )
+
     # SPI Anomaly
     SPI_ANOMALY_WINDOW_SECONDS: int = int(os.getenv("SPI_ANOMALY_WINDOW_SECONDS", "300"))
     SPI_ANOMALY_MIN_EVENTS: int = int(os.getenv("SPI_ANOMALY_MIN_EVENTS", "5"))
