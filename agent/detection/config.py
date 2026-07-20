@@ -154,6 +154,56 @@ class DetectionSettings(BaseModel):
         default=int(os.getenv("SPI_THEN_ALLOWED_MIN_SPI_EVENTS", "3")), gt=0
     )
 
+    # Inbound Exposure and Firewall Policy
+    INBOUND_EXPOSURE_WINDOW_SECONDS: int = Field(
+        default=int(os.getenv("INBOUND_EXPOSURE_WINDOW_SECONDS", "300")), gt=0
+    )
+    INBOUND_SENSITIVE_MIN_ALLOWED_EVENTS: int = Field(
+        default=int(os.getenv("INBOUND_SENSITIVE_MIN_ALLOWED_EVENTS", "3")),
+        gt=0,
+    )
+    INBOUND_SENSITIVE_MIN_DISTINCT_DESTINATIONS: int = Field(
+        default=int(
+            os.getenv("INBOUND_SENSITIVE_MIN_DISTINCT_DESTINATIONS", "1")
+        ),
+        gt=0,
+    )
+    CRITICAL_MANAGEMENT_EXPOSURE_MIN_EVENTS: int = Field(
+        default=int(os.getenv("CRITICAL_MANAGEMENT_EXPOSURE_MIN_EVENTS", "1")),
+        gt=0,
+    )
+    WAN_TO_LAN_MIN_ALLOWED_EVENTS: int = Field(
+        default=int(os.getenv("WAN_TO_LAN_MIN_ALLOWED_EVENTS", "2")), gt=0
+    )
+    WAN_TO_DMZ_ADMIN_MIN_ALLOWED_EVENTS: int = Field(
+        default=int(os.getenv("WAN_TO_DMZ_ADMIN_MIN_ALLOWED_EVENTS", "3")), gt=0
+    )
+    BLOCKED_THEN_ALLOWED_WINDOW_SECONDS: int = Field(
+        default=int(os.getenv("BLOCKED_THEN_ALLOWED_WINDOW_SECONDS", "600")),
+        gt=0,
+    )
+    BLOCKED_THEN_ALLOWED_MIN_BLOCKED_EVENTS: int = Field(
+        default=int(
+            os.getenv("BLOCKED_THEN_ALLOWED_MIN_BLOCKED_EVENTS", "3")
+        ),
+        gt=0,
+    )
+    MULTI_SOURCE_SENSITIVE_WINDOW_SECONDS: int = Field(
+        default=int(
+            os.getenv("MULTI_SOURCE_SENSITIVE_WINDOW_SECONDS", "300")
+        ),
+        gt=0,
+    )
+    MULTI_SOURCE_SENSITIVE_MIN_EVENTS: int = Field(
+        default=int(os.getenv("MULTI_SOURCE_SENSITIVE_MIN_EVENTS", "5")), gt=0
+    )
+    MULTI_SOURCE_SENSITIVE_MIN_DISTINCT_SOURCES: int = Field(
+        default=int(
+            os.getenv("MULTI_SOURCE_SENSITIVE_MIN_DISTINCT_SOURCES", "3")
+        ),
+        gt=0,
+    )
+
     # SPI Anomaly
     SPI_ANOMALY_WINDOW_SECONDS: int = int(os.getenv("SPI_ANOMALY_WINDOW_SECONDS", "300"))
     SPI_ANOMALY_MIN_EVENTS: int = int(os.getenv("SPI_ANOMALY_MIN_EVENTS", "5"))

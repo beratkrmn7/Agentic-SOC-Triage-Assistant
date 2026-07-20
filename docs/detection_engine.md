@@ -133,9 +133,63 @@ The SPI sequence requires three preceding explicit SPI blocks within 600 seconds
 allowed event must occur later for the same source, relate to an affected destination,
 and use the same port or existing service profile; it remains signal evidence.
 
-All 29 registered rules remain batch-local to one `DetectionEngine.analyze()` call.
+All Phase 6C rules remain batch-local to one `DetectionEngine.analyze()` call.
 TCP anomaly, probe, and SPI sequence evidence indicates suspicious network behavior;
 it is not proof of successful authentication, exploitation, compromise, or execution.
+
+## Phase 6D Inbound Exposure and Firewall Policy Pack
+
+Inbound exposure rules calculate an effective destination without mutating the canonical
+event: `translated_dst_ip` and `translated_dst_port` take precedence when present;
+otherwise `dst_ip` and `dst_port` are used. Destination translation is structural
+evidence from those canonical translated fields. An ambiguous `nat_type` value alone is
+not sufficient for a DNAT signal.
+
+Zone matching is case-insensitive, bounded, and token based. Hyphens, underscores, and
+spaces separate exact tokens. WAN/external tokens are `wan`, `internet`, `external`,
+`outside`, and `untrust`, with numbered forms such as `wan1`; LAN/internal tokens are
+`lan`, `internal`, `inside`, and `trust`; DMZ uses `dmz`. Thus `wan1-zone`,
+`internal-zone`, and `dmz_network` are recognized, while missing or unknown zones are
+not guessed. Public-to-private IP direction and public-to-private destination
+translation can supply inbound evidence when explicit zones are absent. Loopback,
+multicast, unspecified, link-local, malformed, and private-to-private endpoints are not
+treated as external inbound traffic.
+
+Sensitive TCP services are SSH (22, 2022, 2222), RDP (3389), SMB (139, 445), VNC
+(5900-5905), WinRM (5985, 5986), Telnet (23), FTP (20, 21), databases (1433, 1521,
+3306, 5432, 6379, 9200, 27017), Kubernetes (6443, 10250), and Docker (2375, 2376).
+Ports 80 and 443 are excluded. WAN-to-DMZ policy detection additionally recognizes
+administrative ports 8000, 8080, 8443, 8888, 9000, 9443, and 10000. The deliberately
+narrow single-event critical set is exactly 2375, 6379, 9200, 10250, and 27017.
+
+| Rule ID | Family | Severity | Default threshold |
+| --- | --- | --- | --- |
+| `critical_management_service_exposed` | `firewall_exposure` | high | 1 event with explicit WAN or private destination translation evidence |
+| `blocked_then_allowed_same_service` | `network_intrusion_candidate` | high | 3 non-SPI blocks before a related allowed event in 600 seconds |
+| `dnat_sensitive_service_exposure` | `firewall_exposure` | high | Allowed private destination translation from a public source or explicit WAN |
+| `wan_to_lan_sensitive_service_allowed` | `firewall_policy` | high | 2 allowed events with explicit WAN-to-LAN zones |
+| `multi_source_allowed_sensitive_service` | `firewall_exposure` | high | 5 events from 3 public sources in 300 seconds |
+| `wan_to_dmz_administrative_service_allowed` | `firewall_policy` | medium | 3 allowed events with explicit WAN-to-DMZ zones |
+| `inbound_sensitive_service_allowed` | `firewall_exposure` | medium | 3 allowed events in 300 seconds |
+
+Configuration uses `INBOUND_EXPOSURE_WINDOW_SECONDS`,
+`INBOUND_SENSITIVE_MIN_ALLOWED_EVENTS`,
+`INBOUND_SENSITIVE_MIN_DISTINCT_DESTINATIONS`,
+`CRITICAL_MANAGEMENT_EXPOSURE_MIN_EVENTS`, `WAN_TO_LAN_MIN_ALLOWED_EVENTS`,
+`WAN_TO_DMZ_ADMIN_MIN_ALLOWED_EVENTS`, `BLOCKED_THEN_ALLOWED_WINDOW_SECONDS`,
+`BLOCKED_THEN_ALLOWED_MIN_BLOCKED_EVENTS`,
+`MULTI_SOURCE_SENSITIVE_WINDOW_SECONDS`, `MULTI_SOURCE_SENSITIVE_MIN_EVENTS`, and
+`MULTI_SOURCE_SENSITIVE_MIN_DISTINCT_SOURCES`. All are positive integers and preserve
+environment-variable overrides.
+
+The generic blocked-then-allowed rule correlates one source, effective destination, and
+exact port or deterministic service without requiring target diversity. Explicit SPI
+blocks are excluded because `spi_followed_by_allowed_connection` owns that sequence.
+The final allowed event remains in both signal event IDs and evidence.
+
+All 36 registered rules use only events supplied to the current
+`DetectionEngine.analyze()` call. Allowed access, exposure, or policy evidence is not
+proof of successful authentication, exploitation, compromise, or remote execution.
 
 ## Determinism
 

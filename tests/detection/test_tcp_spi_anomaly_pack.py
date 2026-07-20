@@ -593,14 +593,14 @@ def test_service_probe_precedence_and_tcp_anomaly_coexistence_are_preserved() ->
     }
 
 
-def test_default_registry_contains_exactly_twenty_nine_unique_rules() -> None:
+def test_default_registry_contains_exactly_thirty_six_unique_rules() -> None:
     register_default_rules()
     register_default_rules()
     rules = default_registry.get_all_rules()
     rule_ids = {rule.rule_id for rule in rules}
 
-    assert len(rules) == 29
-    assert len(rule_ids) == 29
+    assert len(rules) == 36
+    assert len(rule_ids) == 36
     assert EXISTING_RULE_IDS.issubset(rule_ids)
     assert NEW_RULE_IDS.issubset(rule_ids)
     assert all(
