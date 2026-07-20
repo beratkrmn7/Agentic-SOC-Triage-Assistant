@@ -45,6 +45,15 @@ def register_default_rules():
         TcpSynRstAnomalyRule,
         TcpXmasScanRule,
     )
+    from agent.detection.detectors.inbound_exposure import (
+        BlockedThenAllowedSameServiceRule,
+        CriticalManagementServiceExposedRule,
+        DnatSensitiveServiceExposureRule,
+        InboundSensitiveServiceAllowedRule,
+        MultiSourceAllowedSensitiveServiceRule,
+        WanToDmzAdministrativeServiceAllowedRule,
+        WanToLanSensitiveServiceAllowedRule,
+    )
 
     # Register rules
     default_registry.register(HorizontalScanRule())
@@ -76,3 +85,10 @@ def register_default_rules():
     default_registry.register(TcpSynRstAnomalyRule())
     default_registry.register(RepeatedTcpResetAnomalyRule())
     default_registry.register(SpiFollowedByAllowedConnectionRule())
+    default_registry.register(InboundSensitiveServiceAllowedRule())
+    default_registry.register(CriticalManagementServiceExposedRule())
+    default_registry.register(DnatSensitiveServiceExposureRule())
+    default_registry.register(WanToLanSensitiveServiceAllowedRule())
+    default_registry.register(WanToDmzAdministrativeServiceAllowedRule())
+    default_registry.register(BlockedThenAllowedSameServiceRule())
+    default_registry.register(MultiSourceAllowedSensitiveServiceRule())
