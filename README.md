@@ -1,249 +1,407 @@
-# Agentic SOC Triage Assistant - Phase 4 (Secure Agentic Triage - IN PROGRESS)
+# Agentic SOC Triage Assistant
 
-The system operates strictly as a **Triage Assistant**. It does not perform autonomous remediation (e.g., blocking IPs) or replace SIEM correlation rules. Its purpose is to contextualize alerts and accelerate analyst decision-making.
+[![CI Pipeline](https://github.com/beratkrmn7/Agentic-SOC-Triage-Assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/beratkrmn7/Agentic-SOC-Triage-Assistant/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/downloads/)
 
-### Phase 4: Secure Agentic Triage
-The system operates securely as an advisory tool, heavily constraining LLM behavior:
-- **Deterministic Schemas**: All inputs and outputs must pass strict Pydantic validation boundaries.
-- **Evidence Verification**: Deterministically validates that evidence cited by the LLM exactly matches the original raw logs to prevent hallucinations.
-- **Claim Verification**: Validates that all assertions and claims made by the LLM are backed by verified evidence.
-- **Resilience and Stability**: Integrates an idempotent retry layer, circuit breakers, and defensive programming against API failures and token limits.
-- **Secure Tools**: Replaced legacy unbound loops with bounded search_logs execution.
+A deterministic, evidence-first security operations triage platform with an optional,
+constrained LLM review stage.
 
-### Phase 2: Professional Log Ingestion Platform
-The ingestion layer has been upgraded to a modular, robust, and extensible platform capable of handling diverse log formats reliably:
-- **Safe Streaming Readers**: Memory-efficient processing of `JSONL`, `JSON Arrays`, `Syslog`, and `CEF` logs with strict size limits.
-- **Parser Plugin System**: A confidence-based parser registry with deterministic schema fingerprinting. Support for custom vendors is as easy as adding a class.
-- **Fail-safe Operations**: Unparseable and unsupported schemas are isolated. A single malformed line will not crash the pipeline.
-- **Canonical Schema**: All records are mapped to an upgraded `CanonicalLogEvent` standardizing IP, ports, network zones, timestamps, and parsing metadata.
-- **Full Traceability**: Every event gets a deterministic `EVT-*` ID, and all parse warnings/errors are captured without leaking sensitive raw logs.
+The project ingests heterogeneous logs, normalizes them into a canonical event model,
+evaluates 36 registered detection rules, correlates valid signals into incidents, and can
+then ask a guarded triage agent to prepare an analyst-facing report. Ingestion and
+detection do not call an LLM or any other provider; provider access is confined to the
+optional triage stage.
 
-## Features (Phase 1)
-- **Robust Ingestion Pipeline**: Deterministically parses logs into a `CanonicalLogEvent` using schema fingerprinting and pre-defined parsers.
-- **Strict Evidence Validation**: Evidence gathered by the LLM is deterministically validated against the original logs (`original_fields` and `raw_message`).
-- **Graceful Fallback**: Enforces a `needs_review` verdict automatically if the agent hallucinates or if the LLM is unavailable.
-- **Decoupled Architecture**: End-to-end data contracts using typed `CanonicalLogEvent` objects instead of raw dictionaries.
+> [!IMPORTANT]
+> This system is an analyst-support tool. It does not autonomously block traffic, change
+> firewall policy, or prove exploitation, authentication, or compromise from an allowed
+> connection alone.
 
-## System Overview
+## What the project provides
 
-This project is not a simple LLM chatbot. Raw logs are first normalized and analyzed by deterministic Python detection rules. These rules generate detected signals and candidate evidence before the LLM is invoked. The Triage Agent then reviews these signals, optionally calls the `search_logs` tool for additional context, and submits a structured triage decision. Every evidence item is validated against the original raw logs before the final report is generated.
-
-The final output is a concise SOC triage report focused on four questions:
-
-1. What happened?
-2. Why is it suspicious or benign?
-3. What evidence supports the verdict?
-4. What should the analyst do next?
+- **Deterministic ingestion:** bounded streaming readers for JSON Lines, JSON arrays,
+  single JSON objects, Syslog, CEF, and supported text logs.
+- **Canonical normalization:** stable `EVT-*` identifiers, timezone-aware timestamps,
+  parse status, network/NAT/zone fields, PF SPI metadata, and structural TCP flags.
+- **Contract-driven detection:** immutable rule metadata, deterministic registration,
+  rule-level event eligibility, signal validation, and evidence ownership checks.
+- **36 default rules:** network scanning, service probing, TCP/SPI anomalies, firewall
+  exposure, and firewall policy behavior.
+- **Deterministic correlation:** stable signal and incident identities, bounded evidence,
+  suppression, and duplicate prevention.
+- **Secure optional triage:** Groq or local Ollama provider support, bounded tools,
+  evidence and claim validation, retries, circuit breaking, caching, and safe
+  `needs_review` fallbacks.
+- **Persistent application layer:** SQLAlchemy repositories, Unit of Work transactions,
+  Alembic migrations, incident lifecycle state, audit trails, and idempotent analysis jobs.
+- **REST and worker interfaces:** FastAPI endpoints, database-backed polling workers, and
+  an optional Celery/Redis queue adapter.
+- **Operational controls:** API key or OIDC/JWT authentication, RBAC, rate limiting,
+  request-size limits, security headers, structured database search, retention planning,
+  verified archives, bounded cleanup, and an optional OpenSearch foundation.
 
 ## Architecture
 
-1. **Ingestion Layer (`agent/ingestion/`)**: Modular platform supporting JSON, Syslog, CEF. Detects formats, streams data securely, generates fingerprints, and assigns deterministic IDs.
-2. **Parser Registry (`agent/parsers/`)**: Confidence-based plugin system containing parsers for `pf_firewall`, `syslog`, `cef`, `generic_json`, and `mock`.
-3. **Filtering Engine (`agent/filtering.py`)**: Filters out known noisy events (e.g., internal scans) and flags candidates.
-4. **Correlation Engine (`agent/correlation.py`)**: Groups related events into Incident Bundles based on source IP and temporal proximity.
-5. **Triage Agent (`agent/graph.py`)**: LangGraph workflow containing Pre-Analysis, Triage, and Reporting nodes. Uses Groq/Llama-3 for decision making.
-
-## Key Features
-
-- **LangGraph-based agentic workflow:** The system is built as a controlled state machine instead of a free-form chatbot.
-- **Deterministic pre-analysis:** Python detection rules identify suspicious or benign patterns before the LLM is invoked.
-- **Candidate evidence generation:** Detection rules generate structured evidence with `event_id`, `quote`, `reason`, and `source`.
-- **Constrained Triage Agent:** The LLM can only use limited tools such as `search_logs` and `submit_triage_result`.
-- **Evidence validation:** Every submitted evidence item is checked against the original raw logs.
-- **needs_review fallback:** Invalid, missing, or weak evidence prevents unsafe automatic decisions.
-- **MITRE ATT&CK mapping:** Relevant incident types are mapped to ATT&CK techniques.
-- **Concise SOC reporting:** Reports are short, evidence-based, and focused on analyst decision-making.
-- **FastAPI support:** The workflow can be used through REST endpoints.
-- **Pytest coverage:** Deterministic detection and validation logic are covered by tests.
-
-### 1. Robust Pipeline Core (Phase 1)
-- Deterministic Event ID Generation (SHA-256)
-- File Upload Security (Chunking, Temp File Cleanup)
-- Ingestion Limits Enforcement
-- Comprehensive Unit Testing & Benchmarking
-
-### 2. Advanced Parsers & Integration (Phase 2) - **COMPLETED**
-- Flexible JSON Reader with Array and Single Object support
-- Strict vs Lenient UTF-8 Encoding Handlers
-- Dynamic Format Detection (JSONL, Syslog, CEF, Text Logs)
-- Universal `CanonicalLogEvent` Mapping
-- Extensible Parser Registry (`agent/parsers/registry.py`)
-- Standardized API Error Handling (HTTP 413, 415, 422)
-
-### 3. Detection Engine (Phase 3) - **COMPLETED**
-- Deterministic detection rules for multiple incident types
-- Automated evidence gathering and mitigation recommendation
-- Robust deduplication and alert suppression
-- Safe event context mapping
-
-### 4. Secure Agentic Triage (Phase 4) - **COMPLETED**
-- Abstracted Triage Provider interface for LLMs
-- Circuit Breaker pattern to handle repeated provider failures
-- Idempotent execution with max iteration limits
-- Strong bounds on LLM tool usage (`SearchLogsTool`)
-- Rigorous evidence and claim validation
-- Deterministic markdown generation reporting
-
-### 5. Persistent Backend Foundation (Phase 5A) - **COMPLETED**
-- SQLAlchemy ORM database layer with SQLite support
-- Alembic database migrations
-- Repository and UnitOfWork patterns for transaction management
-- Incident lifecycle state machine and audit trails
-- Versioned `/api/v1/incidents` REST endpoints
-
-## Why This Is Not Just an LLM Chatbot
-
-A simple chatbot would send raw logs directly to an LLM and return a free-form answer. This project uses a controlled agentic workflow:
-
-1. Logs are normalized with event IDs.
-2. Deterministic detection rules generate signals and candidate evidence.
-3. The Triage Agent reviews structured evidence and may call tools for more context.
-4. The triage result must follow a strict Pydantic schema.
-5. Evidence is validated against the original raw logs.
-6. The final report is generated only from validated evidence and deterministic recommendations.
-
-This makes the system a controlled Agentic SOC Triage PoC rather than a plain LLM chatbot.
-
-## Report Generation
-
-The report generation layer is intentionally concise and evidence-first. The goal is not to produce long generic security writeups, but to create a short SOC triage report that can be understood quickly.
-
-Each report answers four questions:
-
-1. **Verdict:** Is the incident a false positive, suspicious activity, confirmed incident, or does it need human review?
-2. **Why it matters:** Why is the log suspicious, malicious, benign, or inconclusive?
-3. **Key evidence:** Which validated event IDs and log quotes support the decision?
-4. **Recommended actions:** What should the analyst do next?
-
-The report is designed to be short and readable. It avoids unsupported claims such as data exfiltration, account compromise, or database compromise unless the logs provide direct evidence.
-
-### Example Report Format
-<img width="1917" height="1055" alt="image" src="https://github.com/user-attachments/assets/77ae86e2-2832-4d7f-8879-81635dbc1375" />
-
-## Tech Stack
-
-- Python 3.11+
-- LangGraph
-- LangChain / LangChain Groq
-- Groq API with Llama 3.3 70B
-- Pydantic
-- FastAPI
-- Uvicorn
-- Pytest
-- Rich for terminal output
-
-## Project Structure
-
-```text
-SOC-Project/
-├── agent/
-│   ├── ingestion/        # Log ingestion pipeline, readers, and limits
-│   ├── parsers/          # Parsers and plugins (syslog, cef, generic json, pf_firewall)
-│   ├── graph.py          # LangGraph workflow definition
-│   ├── nodes.py          # Workflow nodes: extraction, detection, triage, validation, reporting
-│   ├── tools.py          # LLM-accessible tools and deterministic detection functions
-│   ├── schema.py         # Canonical schema mapping
-│   ├── correlation.py    # Temporal and spatial correlation engine
-│   └── models.py         # Pydantic schemas and LangGraph state definitions
-├── data/                 # Sample logs and mock datasets
-├── tests/                # Pytest coverage (100% passing)
-├── main.py               # Terminal-based test runner
-├── server.py             # FastAPI server
-├── requirements.txt      
-├── requirements-dev.txt
-└── README.md
+```mermaid
+flowchart LR
+    A["Log files / records"] --> B["Bounded ingestion readers"]
+    B --> C["Parser registry"]
+    C --> D["CanonicalLogEvent"]
+    D --> E["DetectionEngine\n36 deterministic rules"]
+    E --> F["Validated DetectionSignal"]
+    F --> G["Incident correlation\nand suppression"]
+    G --> H["SQLAlchemy persistence\nand audit trail"]
+    G --> I["Optional guarded\ntriage agent"]
+    I --> H
+    H --> J["FastAPI / CLI / workers"]
+    H -. "safe projections" .-> K["Optional OpenSearch\nfoundation and outbox"]
 ```
 
-## Getting Started
+The important trust boundary is between deterministic analysis and agentic review:
 
-### Prerequisites
-- Python 3.11+
-- [Groq API Key](https://console.groq.com/) (Optional, but required for full LLM capability)
+1. Readers and parsers produce validated canonical events.
+2. `DetectionEngine` performs global eligibility and deduplication checks.
+3. Each registered rule selects relevant events through its metadata contract.
+4. Every emitted signal is checked against rule identity, input event IDs, evidence
+   ownership, ordering, severity, and duplicate constraints.
+5. Valid signals are correlated into deterministic incident bundles.
+6. If enabled, the triage agent receives structured incident context and bounded tools;
+   its evidence and claims are verified before a report is accepted.
 
-### Installation
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Configure environment variables:
-   Copy `.env.example` to `.env` and configure your settings.
-   ```bash
-   cp .env.example .env
-   ```
+Run `python main.py --detect-file ...` or call `/detect/file` when a completely
+provider-free path is required.
 
-### Running Locally
+## Detection coverage
 
-**CLI Mode:**
-Run mock data through the pipeline:
-```bash
-python main.py
+The default registry contains exactly **36 rules**, ordered by ascending priority and then
+by `rule_id`. Calling default registration repeatedly is idempotent.
+
+| Pack | Count | Registered rule IDs |
+| --- | ---: | --- |
+| Correctness and contract foundation | 5 | `network_scan_horizontal`, `network_scan_vertical`, `remote_service_probe`, `spi_anomaly_burst`, `network_flood_dos` |
+| Advanced scan pack | 8 | `low_and_slow_horizontal_scan`, `low_and_slow_vertical_scan`, `repeated_blocked_scanner`, `internal_lateral_scan`, `subnet_sweep`, `distributed_scan`, `multi_service_sweep`, `scan_followed_by_allowed_connection` |
+| Remote service probe pack | 8 | `smb_probe`, `vnc_probe`, `winrm_probe`, `database_service_probe`, `kubernetes_service_probe`, `docker_daemon_probe`, `web_admin_panel_probe`, `legacy_cleartext_service_probe` |
+| TCP and SPI anomaly pack | 8 | `tcp_null_scan`, `tcp_xmas_scan`, `tcp_fin_scan`, `tcp_ack_scan`, `tcp_syn_fin_anomaly`, `tcp_syn_rst_anomaly`, `repeated_tcp_reset_anomaly`, `spi_followed_by_allowed_connection` |
+| Inbound exposure and policy pack | 7 | `inbound_sensitive_service_allowed`, `critical_management_service_exposed`, `dnat_sensitive_service_exposure`, `wan_to_lan_sensitive_service_allowed`, `wan_to_dmz_administrative_service_allowed`, `blocked_then_allowed_same_service`, `multi_source_allowed_sensitive_service` |
+
+`remote_service_probe` remains one registered rule while preserving the historical
+service-specific RDP and SSH signal identities (`rdp_probe` and `ssh_probe`) through
+validated signal variants.
+
+The inbound exposure pack uses translated destination fields when present without
+mutating the canonical event. It recognizes bounded, case-insensitive WAN/LAN/DMZ zone
+tokens, excludes ordinary ports 80 and 443, and treats an allowed event only as policy or
+exposure evidence—not proof of compromise. The narrow single-event critical management
+set is Docker plaintext daemon (2375), Redis (6379), Elasticsearch (9200), Kubelet
+(10250), and MongoDB (27017).
+
+See [Detection Engine](docs/detection_engine.md) for rule contracts, thresholds, service
+sets, event eligibility, evidence requirements, and instructions for adding a rule.
+
+## Supported parsing and normalization
+
+The parser registry selects the best deterministic parser by confidence and validates its
+output before it can reach detection. Current parsers cover:
+
+- PF firewall logs (`PfFirewallParser` version 2.2.0), including NAT fields, interface
+  zones, SPI indicators, and normalized TCP flags;
+- CEF records;
+- RFC-style Syslog records;
+- generic JSON records;
+- deterministic mock/test records.
+
+Malformed or unsupported records are isolated and counted rather than crashing the
+whole file. Successfully parsed and semantically valid events remain eligible for global
+detection even when an earlier filtering role would not classify them as triage
+candidates.
+
+To add another parser, follow [Adding a Parser](docs/adding-a-parser.md).
+
+## Quick start
+
+### Requirements
+
+- Python 3.11 or newer
+- Git
+- A Groq API key only if Groq-backed triage is enabled
+- Ollama only if local Ollama-backed triage is enabled
+- Redis only when using Celery or the Redis rate-limit backend
+- OpenSearch only when its optional foundation is explicitly enabled
+
+### Install on Windows PowerShell
+
+```powershell
+git clone https://github.com/beratkrmn7/Agentic-SOC-Triage-Assistant.git
+Set-Location Agentic-SOC-Triage-Assistant
+
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
+
+Copy-Item .env.example .env
+python -m alembic upgrade head
 ```
 
-Process a specific log file:
-```bash
-python main.py --file data/samples/sanitized_firewall_sample.jsonl
-```
-
-To quickly test the ingestion platform without running LLM triage:
-```bash
-python main.py --ingest-file tests/fixtures/mixed/mixed_formats.log
-```
-
-### Ingestion Benchmarking
-To benchmark the ingestion pipeline with large log files:
-```bash
-python scripts/benchmark_ingestion.py --generate-mb 25
-```
-This generates a mock log file and evaluates events-per-second (EPS) performance.
-
-**API Mode:**
-Run the REST API:
-```bash
-python -m uvicorn server:app --reload
-```
-Endpoints:
-- `GET /health` : Liveness probe
-- `GET /ready` : Readiness probe (checks LLM availability)
-- `POST /analyze` : Mock endpoint for analysis
-
-## Testing & CI
-This project uses `pytest`, `mypy`, and `ruff` for code quality and testing. The test suite does not require external network requests and executes gracefully when `LLM_ENABLED=false`.
+### Install on Linux or macOS
 
 ```bash
-# Run tests
-pytest
+git clone https://github.com/beratkrmn7/Agentic-SOC-Triage-Assistant.git
+cd Agentic-SOC-Triage-Assistant
 
-# Run linter
-ruff check .
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
 
-# Run type checking
-mypy agent/
+cp .env.example .env
+python -m alembic upgrade head
 ```
 
-## Security
-- Do not commit `.env` or any real API keys to version control.
-- Dummy keys and mock endpoints should be used in test environments.
+SQLite is the default database (`sqlite:///soc_triage.db`). Alembic should be upgraded
+before using the persistent API or background workers.
 
-## Phase 3 Detection Engine Usage
+## Configuration
 
-### CLI Integration Mode
-The deterministic detection engine runs locally during CLI analysis.
+Settings are loaded from environment variables and `.env` through Pydantic Settings.
+Start with [.env.example](.env.example); it documents the available security, triage,
+rate-limit, search, retention, and OpenSearch options.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `LLM_ENABLED` | `true` | Enables the optional triage stage; it does not affect pure detection mode. |
+| `LLM_PROVIDER` | `groq` | Selects `groq` or `ollama`. |
+| `GROQ_API_KEY` | empty | Required only for Groq-backed triage. |
+| `DATABASE_URL` | `sqlite:///soc_triage.db` | SQLAlchemy database connection. |
+| `AUTH_MODE` | `disabled` | Local bypass, `api_key`, `oidc`, or `hybrid`. |
+| `TASK_QUEUE_BACKEND` | `database` | Database polling or `celery`. |
+| `STAGING_DIR` | `/tmp/agent_staging` | Shared bounded upload staging directory. |
+| `RATE_LIMIT_BACKEND` | `memory` | Development memory limiter or production Redis limiter. |
+| `OPENSEARCH_ENABLED` | `false` | Enables explicit OpenSearch maintenance operations. |
+
+For a provider-free local configuration, set:
+
+```dotenv
+LLM_ENABLED=false
+LLM_PARSER_FALLBACK_ENABLED=false
+```
+
+Production configuration is intentionally fail-closed. Replace all example secrets,
+enable HTTPS, configure trusted hosts/proxies explicitly, use durable shared rate
+limiting, and select an authenticated `AUTH_MODE` before exposing the API.
+
+## Command-line usage
+
+### Ingestion only
+
+```bash
+python main.py --ingest-file data/samples/sanitized_firewall_sample.jsonl
+```
+
+This prints format, parser, duration, success/failure, and safe warning counts.
+
+### Deterministic detection only
+
 ```bash
 python main.py --detect-file data/samples/sanitized_firewall_sample.jsonl
+```
 
+This runs ingestion, all 36 default detection rules, suppression, and incident
+correlation without invoking a provider.
+
+### End-to-end analysis with optional triage
+
+```bash
 python main.py --file data/samples/sanitized_firewall_sample.jsonl
 ```
-This runs the full ingestion pipeline, applies deterministic detection algorithms, clusters correlated incidents, and triggers the AI triage agent on each incident.
 
-### API Mode
-The deterministic detection engine can be exposed as an API endpoint for SIEM integration.
+With no CLI argument, `main.py` runs the bundled mock incident demonstration. Set
+`RUN_ALL=true` to process every mock item.
+
+## REST API
+
+Start the FastAPI application:
+
 ```bash
-uvicorn server:app --reload
+python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Submit a log file for pure deterministic detection (No AI):
+Development API documentation is available at
+<http://127.0.0.1:8000/docs> when `API_DOCS_ENABLED=true`.
+
+Useful endpoint groups include:
+
+- `GET /health/live` and `GET /health/ready`
+- `POST /ingest/file`, `POST /detect/file`, and `POST /analyze/file`
+- `POST /api/v1/analysis-jobs/file`
+- `GET /api/v1/analysis-jobs/{job_id}` and `/result`
+- `GET /api/v1/incidents/` and incident detail, evidence, signal, event, report, and
+  timeline endpoints
+- `GET /api/v1/search/incidents`, `/events`, `/signals`, and `/jobs`
+- `GET /api/v1/workers`
+
+Example provider-free detection request:
+
 ```bash
-curl -X POST -F "file=@tests/data/sample_logs.jsonl" http://localhost:8000/detect/file
+curl -X POST \
+  -F "file=@data/samples/sanitized_firewall_sample.jsonl" \
+  http://127.0.0.1:8000/detect/file
 ```
-The response returns sanitized incidents, signals summary, and duration metrics.
+
+The versioned APIs enforce the configured authentication, RBAC permissions, and rate
+limits. The legacy synchronous endpoints remain available for compatibility.
+
+## Background processing
+
+The default queue backend stores job state in the database. Start a polling worker with:
+
+```bash
+python -m agent.workers.analysis_worker
+```
+
+Use `--once` to process at most one queued job or `--recover-stale` to run stale-job
+recovery. The API and worker must share `DATABASE_URL` and `STAGING_DIR`.
+
+For Celery transport, configure `TASK_QUEUE_BACKEND=celery` and a Redis broker, then run:
+
+```bash
+python -m celery -A agent.queue.celery_app worker --loglevel=info -Q soc-analysis
+```
+
+The database remains the source of truth; Redis transports only job identifiers. See
+[Celery and Redis Queue Adapter](docs/phase5b2-celery-redis.md) for deployment limits.
+
+## Persistence, search, and retention
+
+- **Persistence:** SQLAlchemy models and repositories store jobs, canonical events,
+  signals, incidents, triage runs, evidence, lifecycle state, and audit events.
+- **Search:** versioned structured endpoints use bounded filters and signed cursor
+  pagination over the primary database.
+- **Retention planning:** `python -m agent.maintenance.retention --dry-run` is read-only.
+- **Archives:** `python -m agent.maintenance.archive create` creates and verifies a
+  non-destructive local archive.
+- **Cleanup:** deletion requires a verified archive plus matching explicit archive-ID
+  confirmation through `agent.maintenance.cleanup`.
+- **OpenSearch:** `python -m agent.maintenance.opensearch check|plan|bootstrap` manages an
+  optional safe index foundation. Transactional outbox rows are created with source
+  records, but automated outbox delivery is not implemented yet.
+
+Review the phase-specific documents in [docs](docs) before operating retention cleanup
+or enabling OpenSearch.
+
+## Security model
+
+- Raw records are not sent directly to detection rules as unvalidated dictionaries.
+- File and request sizes are bounded, and temporary files are cleaned up safely.
+- API errors, warnings, and logs use bounded identifiers rather than raw event contents,
+  tokens, credentials, or exception tracebacks.
+- API key authentication stores hashed credentials; OIDC mode validates externally
+  issued asymmetric JWT access tokens through bounded discovery/JWKS caches.
+- RBAC separates viewer, analyst, service, and admin permissions.
+- Deployment middleware controls trusted hosts, proxy headers, HTTPS enforcement, CORS,
+  security headers, and API documentation exposure.
+- Rate limiting can use an in-memory development backend or a shared Redis backend.
+- LLM output is schema-constrained and cannot become a final report until evidence and
+  claims pass deterministic validation.
+
+Never commit `.env`, real API keys, tokens, tenant details, private keys, or production
+connection strings.
+
+## Development and quality gates
+
+Install `requirements-dev.txt`, then run the same core checks as CI:
+
+```bash
+python -m compileall agent main.py server.py
+ruff check .
+mypy agent main.py server.py
+python -m pytest -q --cov=agent --cov-report=term-missing
+```
+
+Target a subsystem while developing, for example:
+
+```bash
+pytest -q tests/detection
+pytest -q tests/ingestion
+pytest -q tests/api_security
+```
+
+Detection tests use fixed timezone-aware timestamps, documentation IP ranges, shared
+event builders, contract assertions, provider-call guards, and deterministic identity
+checks. New detection rules should include positive, negative, threshold-boundary,
+evidence-ownership, and repeatability tests.
+
+Optional benchmarks:
+
+```bash
+python scripts/benchmark_ingestion.py --generate-mb 25
+python scripts/benchmark_detection.py
+```
+
+## Repository layout
+
+```text
+agent/
+  api/             FastAPI health, security, incident, job, search, and worker routes
+  application/     Analysis, background jobs, auth, search, archive, cleanup services
+  archive/         Safe archive formats, storage, integrity, and serialization
+  detection/       Rule contracts, registry, engine, rules, evidence, suppression
+  ingestion/       Format detection, bounded readers, limits, validation, pipeline
+  maintenance/     Retention, archive, cleanup, and OpenSearch commands
+  opensearch/      Safe documents, mappings, client, and foundation management
+  parsers/         PF, CEF, Syslog, generic JSON, and mock parsers
+  persistence/     SQLAlchemy models, repositories, mappers, Unit of Work
+  queue/           Database and Celery dispatch adapters
+  security/        API keys, OIDC/JWT, RBAC, rate limiting, deployment controls
+  triage/          Providers, bounded tools, guardrails, validation, reporting
+  workers/         Polling analysis worker and heartbeat service
+alembic/            Database migrations
+data/samples/       Sanitized sample inputs
+docs/               Architecture, operations, security, and rule documentation
+scripts/            Demonstrations and benchmarks
+tests/              Unit, regression, integration, and security tests
+main.py             CLI entry point
+server.py           FastAPI application entry point
+```
+
+## Documentation map
+
+- [Detection Engine and adding rules](docs/detection_engine.md)
+- [Rule tuning](docs/rule_tuning.md)
+- [False-positive handling](docs/false_positive_handling.md)
+- [Adding a parser](docs/adding-a-parser.md)
+- [Secure agentic triage](docs/phase4-secure-triage.md)
+- [Persistent backend](docs/phase5a-persistent-backend.md)
+- [Background jobs](docs/phase5b1-background-jobs.md)
+- [Celery and Redis](docs/phase5b2-celery-redis.md)
+- [API key authentication](docs/phase5c1-api-key-authentication.md)
+- [RBAC](docs/phase5c2-rbac.md)
+- [OIDC/JWT authentication](docs/phase5c3-oidc-jwt.md)
+- [API security baseline](docs/phase5c4a-api-security-baseline.md)
+- [Rate limiting](docs/phase5c4b-rate-limiting.md)
+- [Structured database search](docs/phase5d1-database-search.md)
+- [Retention planning](docs/phase5d2a-retention-planning.md)
+- [Safe archives](docs/phase5d2b-safe-archive-foundation.md)
+- [Bounded cleanup](docs/phase5d2c-bounded-resumable-cleanup.md)
+- [OpenSearch foundation](docs/phase5d3a-opensearch-foundation.md)
+- [Transactional search outbox](docs/phase5d3b1-transactional-search-outbox.md)
+
+## Current boundaries
+
+This repository is an engineering foundation and SOC triage proof of concept, not a
+complete SIEM or autonomous response platform.
+
+- Detection state is batch-local to one `DetectionEngine.analyze(...)` call.
+- There is no cross-file or cross-job detector state, streaming baseline, GeoIP, or
+  threat-intelligence lookup.
+- Allowed firewall traffic is exposure/policy evidence, not evidence of successful
+  authentication, exploitation, or compromise.
+- Incident Correlation V2, Agent Handoff V2, automated remediation, and a UI are not
+  implemented.
+- OpenSearch bootstrap and transactional outbox foundations exist, but no outbox delivery
+  worker is included yet.
+- Local archives are integrity protected but not encrypted; production storage and key
+  management remain deployment responsibilities.
+
+These boundaries are deliberate: deterministic evidence, traceability, safe failure, and
+backward compatibility take priority over unsupported security conclusions.
