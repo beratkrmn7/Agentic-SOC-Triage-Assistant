@@ -20,12 +20,28 @@ from typing import Literal, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from agent.detection.detectors.scan_helpers import classify_service
+from agent.detection.detectors.scan_helpers import classify_service, destination_subnet
 from agent.detection.models import IncidentBundle
 from agent.schema import CanonicalLogEvent
 
 
 CORRELATION_KEY_PREFIX = "scv"
+
+# Default destination-subnet prefixes for subnet_sweep target scoping. These
+# mirror the DetectionSettings.SUBNET_SWEEP_IPV4_PREFIX / IPV6_PREFIX defaults
+# so a subnet_sweep campaign is scoped to the same subnet granularity the
+# detector itself used; callers may override via derive_stateful_profile.
+DEFAULT_SUBNET_IPV4_PREFIX = 24
+DEFAULT_SUBNET_IPV6_PREFIX = 64
+
+# Multi-service classification buckets that conflate distinct services onto a
+# single label (e.g. Redis, MySQL and PostgreSQL all classify as "database").
+# They must never become a canonical service-identity token, because that
+# would collapse genuinely different campaigns into one. When a port maps to
+# one of these buckets, the exact destination port is used as the identity
+# token instead, keeping Redis/MySQL/etc. distinct.
+_AMBIGUOUS_SERVICE_BUCKETS = frozenset({"database", "kubernetes", "docker"})
+_PROBE_SUFFIX = "_probe"
 
 StatefulStrategy = Literal[
     "source_service_campaign",
@@ -43,7 +59,6 @@ _SOURCE_SERVICE_BROAD_TYPES = frozenset(
     {
         "horizontal_scan",
         "low_and_slow_horizontal_scan",
-        "subnet_sweep",
         "distributed_scan",
         "multi_service_sweep",
         "repeated_blocked_scanner",
@@ -74,7 +89,15 @@ _SOURCE_SERVICE_NARROW_TYPES = frozenset(
         "internal_lateral_scan",
     }
 )
-_SOURCE_SERVICE_INCIDENT_TYPES = _SOURCE_SERVICE_BROAD_TYPES | _SOURCE_SERVICE_NARROW_TYPES
+# subnet_sweep is neither fully broad (target-independent) nor per-target: the
+# campaign continues against different individual IPs but stays within one
+# destination subnet, so its normalized subnet(s) go into target_scopes.
+_SOURCE_SERVICE_SUBNET_TYPES = frozenset({"subnet_sweep"})
+_SOURCE_SERVICE_INCIDENT_TYPES = (
+    _SOURCE_SERVICE_BROAD_TYPES
+    | _SOURCE_SERVICE_NARROW_TYPES
+    | _SOURCE_SERVICE_SUBNET_TYPES
+)
 _SOURCE_SERVICE_FAMILIES = frozenset(
     {"network_scanning", "service_probing", "network_anomaly"}
 )
@@ -202,12 +225,54 @@ def _single_protocol(events: Sequence[CanonicalLogEvent]) -> tuple[str, ...]:
     return (next(iter(protocols)),)
 
 
-def _services_and_ports(
-    ports: Sequence[Optional[int]], *, max_items: int
+def _probe_service_from_incident_type(incident_type: str) -> Optional[str]:
+    """The service-specific identity emitted by a per-service probe rule
+    (e.g. `redis_probe` -> `redis`, `kubelet_probe` -> `kubelet`), or None
+    when the incident type carries no per-service identity."""
+    if incident_type.endswith(_PROBE_SUFFIX):
+        service = incident_type[: -len(_PROBE_SUFFIX)].strip()
+        return service or None
+    return None
+
+
+def _service_identity(
+    incident_type: str,
+    ports: Sequence[Optional[int]],
+    *,
+    max_items: int,
 ) -> tuple[tuple[str, ...], tuple[int, ...]]:
-    known_ports = sorted({p for p in ports if p is not None})[:max_items]
-    services = sorted({s for s in (classify_service(p) for p in known_ports) if s})[:max_items]
-    return tuple(services), tuple(known_ports)
+    """One canonical service identity for the profile.
+
+    Preference order:
+      1. the emitted service-specific signal identity (e.g. ssh_probe,
+         redis_probe) when the incident type carries one;
+      2. otherwise a *specific* classified service (rdp, ssh, smb, ...);
+      3. otherwise the exact destination port token.
+
+    Ambiguous multi-service buckets (database, kubernetes, docker) are never
+    emitted as a service token - the exact port is used instead, so Redis
+    (6379) and MySQL (3306) never collapse into one generic database
+    campaign, and the Kubernetes API (6443) stays distinct from the kubelet
+    (10250).
+    """
+    probe_service = _probe_service_from_incident_type(incident_type)
+    if probe_service:
+        return ((probe_service,), ())
+
+    services: set[str] = set()
+    residual_ports: set[int] = set()
+    for port in ports:
+        if port is None:
+            continue
+        classified = classify_service(port)
+        if classified and classified not in _AMBIGUOUS_SERVICE_BUCKETS:
+            services.add(classified)
+        else:
+            residual_ports.add(port)
+    return (
+        tuple(sorted(services)[:max_items]),
+        tuple(sorted(residual_ports)[:max_items]),
+    )
 
 
 def _derive_source_service_profile(
@@ -216,6 +281,8 @@ def _derive_source_service_profile(
     *,
     correlation_version: str,
     max_items: int,
+    ipv4_subnet_prefix: int,
+    ipv6_subnet_prefix: int,
 ) -> Optional[StatefulCorrelationProfile]:
     if incident.incident_family not in _SOURCE_SERVICE_FAMILIES:
         return None
@@ -233,12 +300,24 @@ def _derive_source_service_profile(
         return None
 
     ports = [_effective_destination_port(event) for event in incident_events]
-    services, destination_ports = _services_and_ports(ports, max_items=max_items)
+    services, destination_ports = _service_identity(
+        incident.incident_type, ports, max_items=max_items
+    )
     if not services and not destination_ports:
         return None
 
     target_scopes: tuple[str, ...] = ()
-    if incident.incident_type in _SOURCE_SERVICE_NARROW_TYPES:
+    if incident.incident_type in _SOURCE_SERVICE_SUBNET_TYPES:
+        # subnet_sweep continues against new IPs within one subnet: scope the
+        # profile to the normalized destination subnet(s), not each exact IP.
+        subnets = {
+            destination_subnet(ip, ipv4_subnet_prefix, ipv6_subnet_prefix)
+            for ip in (_effective_destination_ip(event) for event in incident_events)
+        }
+        target_scopes = tuple(sorted({s for s in subnets if s})[:max_items])
+        if not target_scopes:
+            return None
+    elif incident.incident_type in _SOURCE_SERVICE_NARROW_TYPES:
         destinations = [
             _effective_destination_ip(event) for event in incident_events
         ]
@@ -291,7 +370,9 @@ def _derive_source_target_sequence_profile(
         return None
 
     ports = [_effective_destination_port(event) for event in incident_events]
-    services, destination_ports = _services_and_ports(ports, max_items=max_items)
+    services, destination_ports = _service_identity(
+        incident.incident_type, ports, max_items=max_items
+    )
     if not services and not destination_ports:
         return None
 
@@ -337,7 +418,9 @@ def _derive_protected_service_exposure_profile(
         return None
 
     ports = [_effective_destination_port(event) for event in incident_events]
-    services, destination_ports = _services_and_ports(ports, max_items=max_items)
+    services, destination_ports = _service_identity(
+        incident.incident_type, ports, max_items=max_items
+    )
     if not services and not destination_ports:
         return None
 
@@ -362,6 +445,8 @@ def derive_stateful_profile(
     *,
     correlation_version: str,
     max_profile_items: int,
+    ipv4_subnet_prefix: int = DEFAULT_SUBNET_IPV4_PREFIX,
+    ipv6_subnet_prefix: int = DEFAULT_SUBNET_IPV6_PREFIX,
 ) -> Optional[StatefulCorrelationProfile]:
     """Derive a stateful correlation profile for `incident`, or None.
 
@@ -397,6 +482,8 @@ def derive_stateful_profile(
         incident_events,
         correlation_version=correlation_version,
         max_items=max_profile_items,
+        ipv4_subnet_prefix=ipv4_subnet_prefix,
+        ipv6_subnet_prefix=ipv6_subnet_prefix,
     )
 
 
@@ -414,6 +501,60 @@ class StatefulStateSnapshot(BaseModel):
     expires_at: datetime
 
 
+StateDecision = Literal["merge", "new_generation", "stale", "repair"]
+
+
+def classify_state_decision(
+    state: StatefulStateSnapshot,
+    *,
+    correlation_version: str,
+    incident_exists: bool,
+    incoming_first_seen: datetime,
+    incoming_last_seen: datetime,
+    window_seconds: int,
+    now: datetime,
+) -> StateDecision:
+    """Decide how an incoming incident relates to an existing active state.
+
+    Distinguishes the five cases the persistence layer must handle
+    differently:
+
+    - `merge`          - active, window-compatible: fold into the canonical
+                          incident.
+    - `new_generation` - state expired, a distinctly *later* burst than the
+                          active window, or a correlation-version change: the
+                          incoming incident starts a fresh canonical incident
+                          and advances the generation.
+    - `repair`         - the state points at an incident that no longer
+                          exists (e.g. deleted by retention): safely start a
+                          new generation rather than merging into nothing.
+    - `stale`          - a backward arrival *older* than the active campaign
+                          window (or a malformed window): it must never
+                          replace or mutate the still-active campaign.
+
+    `expires_at` (TTL) only bounds state cleanup; `window_seconds` bounds
+    campaign continuity and is checked independently against the incoming
+    incident's own event timestamps, never ingestion time.
+    """
+    if not incident_exists:
+        return "repair"
+    if state.correlation_version != correlation_version:
+        return "new_generation"
+    if state.expires_at <= now:
+        return "new_generation"
+    if incoming_first_seen > incoming_last_seen:
+        # Malformed incoming window: never mutate an active campaign for it.
+        return "stale"
+    window = timedelta(seconds=window_seconds)
+    if incoming_first_seen > state.last_seen + window:
+        # A distinctly later burst than the active campaign window.
+        return "new_generation"
+    if incoming_last_seen < state.first_seen - window:
+        # A stale backward arrival older than the active campaign window.
+        return "stale"
+    return "merge"
+
+
 def is_state_eligible(
     state: StatefulStateSnapshot,
     *,
@@ -424,27 +565,17 @@ def is_state_eligible(
     window_seconds: int,
     now: datetime,
 ) -> bool:
-    """True when an incoming incident may merge into `state`'s campaign.
-
-    Same TTL alone is never sufficient: `expires_at` only bounds state
-    *cleanup*, while `window_seconds` bounds campaign *continuity* and is
-    checked independently against the incoming incident's own event
-    timestamps (never ingestion time). The window check is a genuine
-    overlap test in both directions, so a late-arriving report of slightly
-    older activity can still merge, while a very old, unrelated incident
-    outside the window cannot reopen an active campaign.
-    """
-    if not incident_exists:
-        return False
-    if state.correlation_version != correlation_version:
-        return False
-    if state.expires_at <= now:
-        return False
-    if incoming_first_seen > incoming_last_seen:
-        return False
-    window = timedelta(seconds=window_seconds)
-    if incoming_first_seen > state.last_seen + window:
-        return False
-    if incoming_last_seen < state.first_seen - window:
-        return False
-    return True
+    """True only when the incoming incident may merge into `state`'s
+    campaign (a thin wrapper over `classify_state_decision`)."""
+    return (
+        classify_state_decision(
+            state,
+            correlation_version=correlation_version,
+            incident_exists=incident_exists,
+            incoming_first_seen=incoming_first_seen,
+            incoming_last_seen=incoming_last_seen,
+            window_seconds=window_seconds,
+            now=now,
+        )
+        == "merge"
+    )

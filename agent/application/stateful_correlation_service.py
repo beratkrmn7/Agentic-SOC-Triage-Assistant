@@ -20,13 +20,15 @@ from sqlalchemy.exc import IntegrityError
 from agent.config import Settings
 from agent.correlation.merge import merge_incident_bundles
 from agent.correlation.stateful import (
+    StatefulCorrelationProfile,
     StatefulStateSnapshot,
+    classify_state_decision,
     compute_correlation_key,
     derive_stateful_profile,
-    is_state_eligible,
 )
 from agent.detection.config import DetectionSettings
-from agent.detection.models import DetectionSignal, IncidentBundle
+from agent.detection.incident_correlation import MAX_INCIDENT_EVIDENCE
+from agent.detection.models import DetectionEvidence, DetectionSignal, IncidentBundle
 from agent.persistence.lifecycle import IncidentLifecycle
 from agent.persistence.mappers import DataMapper
 from agent.persistence.orm_models import (
@@ -42,10 +44,17 @@ from agent.schema import CanonicalLogEvent
 
 
 ResolveStatus = Literal[
-    "created", "merged", "no_op", "new_generation", "unsupported", "disabled"
+    "created", "merged", "no_op", "new_generation", "stale", "unsupported", "disabled"
 ]
 
 MaterialChangeCode = str
+
+# How many persisted incident events to reconstruct evidence from. Generous
+# relative to MAX_INCIDENT_EVIDENCE so the pure merge always has a pool that
+# spans earlier jobs, but still bounded so no single incident reconstruction
+# scans an unbounded event set.
+_EVIDENCE_RECONSTRUCTION_LIMIT = MAX_INCIDENT_EVIDENCE * 5
+_EVIDENCE_QUOTE_MAX_CHARS = 500
 
 
 class StatefulCorrelationError(Exception):
@@ -63,6 +72,10 @@ class StatefulResolveResult:
     correlation_key: Optional[str]
     generation: Optional[int]
     material_changes: tuple[MaterialChangeCode, ...]
+    # Event IDs represented in the merged incident's bounded evidence. Lives
+    # only on this transient result object (never persisted in metrics JSON),
+    # so callers can confirm earlier jobs' evidence survives a merge.
+    evidence_event_ids: tuple[str, ...] = ()
 
 
 def _as_utc(value: Any) -> datetime:
@@ -81,6 +94,13 @@ def _as_utc(value: Any) -> datetime:
     return value
 
 
+def _compute_expires_at(now: datetime, last_seen: datetime, ttl: timedelta) -> datetime:
+    """expires_at must always be strictly later than last_seen (a table CHECK
+    constraint). Bounded future-dated event timestamps can push last_seen past
+    `now`, so anchor the TTL to the later of the two."""
+    return max(now, last_seen) + ttl
+
+
 def _state_snapshot(state: IncidentCorrelationState) -> StatefulStateSnapshot:
     return StatefulStateSnapshot(
         correlation_version=str(state.correlation_version),
@@ -93,6 +113,10 @@ def _state_snapshot(state: IncidentCorrelationState) -> StatefulStateSnapshot:
 
 
 def _is_noop(canonical_row: Incident, incoming_bundle: IncidentBundle, job: IngestionJob) -> bool:
+    """A true no-op requires the SAME job to already be associated and every
+    incoming event/signal ID to already be present. A distinct new job is
+    never a no-op even with identical IDs - it is a material projection
+    change (job_association_added)."""
     if job not in canonical_row.jobs:
         return False
     existing_event_ids = {e.event_id for e in canonical_row.events if not e.is_context}
@@ -104,11 +128,52 @@ def _is_noop(canonical_row: Incident, incoming_bundle: IncidentBundle, job: Inge
     return True
 
 
+def _apply_stateful_metrics(
+    row: Incident,
+    *,
+    correlation_key: str,
+    strategy: str,
+    correlation_version: str,
+    generation: int,
+    merge_count: int,
+    job_count: int,
+    total_events: int,
+    correlated_signal_count: int,
+    absorbed_signal_count: int,
+    primary_signal_id: str,
+) -> None:
+    """Stamp the full bounded scalar stateful-metric set onto the incident.
+
+    Only scalars: no job/event/signal ID lists ever go into metrics JSON -
+    the full associations live in the relational tables.
+    """
+    metrics = dict(row.metrics or {})
+    metrics["stateful_correlation_version"] = correlation_version
+    metrics["stateful_correlation_key"] = correlation_key
+    metrics["stateful_correlation_strategy"] = strategy
+    metrics["stateful_generation"] = int(generation)
+    metrics["stateful_merge_count"] = int(merge_count)
+    metrics["correlated_job_count"] = int(job_count)
+    metrics["total_events"] = int(total_events)
+    metrics["correlated_signal_count"] = int(correlated_signal_count)
+    metrics["absorbed_signal_count"] = int(absorbed_signal_count)
+    metrics["primary_signal_id"] = primary_signal_id
+    row.metrics = metrics  # type: ignore[assignment]
+
+
 class StatefulIncidentMergeService:
     """Focused persistence mechanics for one canonical Incident row."""
 
     def create_canonical(
-        self, uow: UnitOfWork, *, bundle: IncidentBundle, job: IngestionJob
+        self,
+        uow: UnitOfWork,
+        *,
+        bundle: IncidentBundle,
+        job: IngestionJob,
+        correlation_key: str,
+        strategy: str,
+        correlation_version: str,
+        generation: int,
     ) -> Incident:
         existing = uow.incidents.get_for_update(bundle.incident_id)
         if existing is not None:
@@ -120,6 +185,24 @@ class StatefulIncidentMergeService:
         uow.incidents.add(orm_incident)
         orm_incident.jobs.append(job)
         IncidentLifecycle.transition(orm_incident, "new", actor="stateful_correlation")
+
+        primary_signal_id = str(
+            bundle.metrics.get("primary_signal_id")
+            or (bundle.signal_ids[0] if bundle.signal_ids else "")
+        )
+        _apply_stateful_metrics(
+            orm_incident,
+            correlation_key=correlation_key,
+            strategy=strategy,
+            correlation_version=correlation_version,
+            generation=generation,
+            merge_count=0,
+            job_count=len(orm_incident.jobs),
+            total_events=len(bundle.event_ids),
+            correlated_signal_count=len(bundle.signal_ids),
+            absorbed_signal_count=len(bundle.absorbed_signal_ids),
+            primary_signal_id=primary_signal_id,
+        )
         return orm_incident
 
     def merge_into_canonical(
@@ -130,17 +213,30 @@ class StatefulIncidentMergeService:
         incoming_bundle: IncidentBundle,
         job: IngestionJob,
         available_signals: Optional[Sequence[DetectionSignal]],
+        canonical_evidence: Sequence[DetectionEvidence],
         detection_settings: DetectionSettings,
         max_context_events: int,
-    ):
+        correlation_key: str,
+        strategy: str,
+        correlation_version: str,
+        generation: int,
+    ) -> tuple[Incident, tuple[MaterialChangeCode, ...], tuple[str, ...]]:
+        existing_metrics = cast(dict, canonical_row.metrics or {})
+        prev_merge_count = int(existing_metrics.get("stateful_merge_count", 0) or 0)
+        job_newly_associated = job not in canonical_row.jobs
+
         canonical_bundle = DataMapper.orm_to_domain_incident(canonical_row)
         # SQLite drops tzinfo on DateTime(timezone=True) round-trips; other
         # dialects preserve it. Normalize so merge_incident_bundles never
-        # compares a naive ORM-loaded timestamp against an aware one.
+        # compares a naive ORM-loaded timestamp against an aware one. Also
+        # inject the reconstructed historical evidence (the ORM incident has
+        # no evidence column, so mappers hydrate it empty - see Phase 6E.4A
+        # blocker 5).
         canonical_bundle = canonical_bundle.model_copy(
             update={
                 "first_seen": _as_utc(canonical_bundle.first_seen),
                 "last_seen": _as_utc(canonical_bundle.last_seen),
+                "evidence": list(canonical_evidence),
             }
         )
         outcome = merge_incident_bundles(
@@ -168,8 +264,14 @@ class StatefulIncidentMergeService:
             if signal_id not in existing_signal_ids:
                 canonical_row.signals.append(IncidentSignal(signal_id=signal_id))
 
-        if job not in canonical_row.jobs:
+        if job_newly_associated:
             canonical_row.jobs.append(job)
+
+        material_changes = list(outcome.material_changes)
+        if job_newly_associated:
+            # A new job association changes the incident's projection even when
+            # its event/signal IDs already exist.
+            material_changes.append("job_association_added")
 
         # Classic (non-Mapped) Column declarations statically type instance
         # attributes as Column[T]; the same convention as
@@ -186,10 +288,31 @@ class StatefulIncidentMergeService:
         canonical_row.mitre_techniques = merged.mitre_techniques  # type: ignore[assignment]
         canonical_row.metrics = merged.metrics  # type: ignore[assignment]
 
-        if outcome.material_changes:
+        _apply_stateful_metrics(
+            canonical_row,
+            correlation_key=correlation_key,
+            strategy=strategy,
+            correlation_version=correlation_version,
+            generation=generation,
+            merge_count=prev_merge_count + 1,
+            job_count=len(canonical_row.jobs),
+            total_events=int(merged.metrics.get("total_events", len(merged.event_ids))),
+            correlated_signal_count=int(
+                merged.metrics.get("correlated_signal_count", len(merged.signal_ids))
+            ),
+            absorbed_signal_count=int(
+                merged.metrics.get("absorbed_signal_count", len(merged.absorbed_signal_ids))
+            ),
+            primary_signal_id=str(merged.metrics.get("primary_signal_id", "")),
+        )
+
+        if material_changes:
+            # Exactly one version bump per material merge (including a pure
+            # new-job association), exposing the updated row for the outbox.
             canonical_row.version = max(1, int(canonical_row.version or 1)) + 1  # type: ignore[assignment]
 
-        return canonical_row, outcome
+        evidence_event_ids = tuple(item.event_id for item in merged.evidence)
+        return canonical_row, tuple(material_changes), evidence_event_ids
 
 
 class StatefulIncidentCorrelationService:
@@ -221,150 +344,271 @@ class StatefulIncidentCorrelationService:
         now = now or datetime.now(timezone.utc)
 
         if not settings.stateful_correlation_enabled:
-            return StatefulResolveResult(
-                status="disabled",
-                canonical_incident=None,
-                incoming_incident_id=incoming_bundle.incident_id,
-                canonical_incident_id=None,
-                correlation_key=None,
-                generation=None,
-                material_changes=(),
-            )
+            return self._result("disabled", incoming_bundle)
 
         profile = derive_stateful_profile(
             incoming_bundle,
             incoming_events,
             correlation_version=settings.stateful_correlation_version,
             max_profile_items=settings.stateful_correlation_max_profile_items,
+            ipv4_subnet_prefix=detection_settings.SUBNET_SWEEP_IPV4_PREFIX,
+            ipv6_subnet_prefix=detection_settings.SUBNET_SWEEP_IPV6_PREFIX,
         )
         if profile is None:
-            return StatefulResolveResult(
-                status="unsupported",
-                canonical_incident=None,
-                incoming_incident_id=incoming_bundle.incident_id,
-                canonical_incident_id=None,
-                correlation_key=None,
-                generation=None,
-                material_changes=(),
-            )
+            return self._result("unsupported", incoming_bundle)
 
         correlation_key = compute_correlation_key(profile)
         ttl = timedelta(seconds=settings.stateful_correlation_state_ttl_seconds)
         window_seconds = settings.stateful_correlation_window_seconds
 
         assert uow.session is not None, "resolve_and_merge requires an open UnitOfWork"
-        session = uow.session
 
         state = uow.correlation_state.get_for_update(correlation_key)
 
         if state is None:
-            try:
-                with session.begin_nested():
-                    new_state = IncidentCorrelationState(
-                        correlation_key=correlation_key,
-                        correlation_version=profile.correlation_version,
-                        strategy=profile.strategy,
-                        incident_id=incoming_bundle.incident_id,
-                        profile=profile.model_dump(mode="json"),
-                        generation=1,
-                        first_seen=incoming_bundle.first_seen,
-                        last_seen=incoming_bundle.last_seen,
-                        expires_at=now + ttl,
-                        version=1,
-                    )
-                    uow.correlation_state.add(new_state)
-                    session.flush()
-            except IntegrityError:
-                # Another worker won the race to create this correlation_key.
-                # Re-read the winning row and fall through to the
-                # already-exists handling below using that row.
-                state = uow.correlation_state.get_for_update(correlation_key)
-                if state is None:
-                    raise StatefulCorrelationError(
-                        "stateful_correlation_state_race_unresolved"
-                    ) from None
-            else:
-                canonical_row = self._merge_service.create_canonical(
-                    uow, bundle=incoming_bundle, job=job
-                )
-                session.flush()
-                return StatefulResolveResult(
-                    status="created",
-                    canonical_incident=canonical_row,
-                    incoming_incident_id=incoming_bundle.incident_id,
-                    canonical_incident_id=str(canonical_row.incident_id),
-                    correlation_key=correlation_key,
-                    generation=1,
-                    material_changes=("new_state",),
-                )
+            created = self._try_create(
+                uow,
+                incoming_bundle=incoming_bundle,
+                job=job,
+                profile=profile,
+                correlation_key=correlation_key,
+                ttl=ttl,
+                now=now,
+            )
+            if created is not None:
+                return created
+            # Lost the unique-correlation_key race: re-read the winner and
+            # fall through to the existing-state path to merge into it.
+            state = uow.correlation_state.get_for_update(correlation_key)
+            if state is None:
+                raise StatefulCorrelationError("stateful_correlation_state_race_unresolved")
 
-        incident_exists = uow.incidents.get_for_update(state.incident_id) is not None
-        eligible = incident_exists and is_state_eligible(
+        canonical_incident_row = uow.incidents.get_for_update(state.incident_id)
+        decision = classify_state_decision(
             _state_snapshot(state),
             correlation_version=profile.correlation_version,
-            incident_exists=incident_exists,
+            incident_exists=canonical_incident_row is not None,
             incoming_first_seen=incoming_bundle.first_seen,
             incoming_last_seen=incoming_bundle.last_seen,
             window_seconds=window_seconds,
             now=now,
         )
 
-        if eligible:
-            canonical_row = uow.incidents.get_for_update(state.incident_id)
-            assert canonical_row is not None
-
-            if _is_noop(canonical_row, incoming_bundle, job):
-                return StatefulResolveResult(
-                    status="no_op",
-                    canonical_incident=canonical_row,
-                    incoming_incident_id=incoming_bundle.incident_id,
-                    canonical_incident_id=str(canonical_row.incident_id),
-                    correlation_key=correlation_key,
-                    generation=int(state.generation),
-                    material_changes=(),
-                )
-
-            available_signals = self._load_available_signals(
-                uow, canonical_row, incoming_signal_rows
+        if decision == "stale":
+            # Leave the active correlation row entirely unchanged.
+            return self._result(
+                "stale",
+                incoming_bundle,
+                canonical_incident=canonical_incident_row,
+                canonical_incident_id=str(state.incident_id),
+                correlation_key=correlation_key,
+                generation=int(state.generation),
             )
-            merged_row, outcome = self._merge_service.merge_into_canonical(
+
+        if decision == "merge":
+            assert canonical_incident_row is not None
+            return self._merge(
+                uow,
+                canonical_row=canonical_incident_row,
+                incoming_bundle=incoming_bundle,
+                incoming_signal_rows=incoming_signal_rows,
+                job=job,
+                profile=profile,
+                correlation_key=correlation_key,
+                state=state,
+                ttl=ttl,
+                now=now,
+                detection_settings=detection_settings,
+            )
+
+        # decision in ("new_generation", "repair")
+        return self._new_generation(
+            uow,
+            incoming_bundle=incoming_bundle,
+            job=job,
+            profile=profile,
+            correlation_key=correlation_key,
+            state=state,
+            ttl=ttl,
+            now=now,
+        )
+
+    # -- internal paths ----------------------------------------------------
+
+    def _try_create(
+        self,
+        uow: UnitOfWork,
+        *,
+        incoming_bundle: IncidentBundle,
+        job: IngestionJob,
+        profile: StatefulCorrelationProfile,
+        correlation_key: str,
+        ttl: timedelta,
+        now: datetime,
+    ) -> Optional[StatefulResolveResult]:
+        """Create the canonical incident and its state row inside a single
+        savepoint so the FK (state.incident_id -> incidents.incident_id) is
+        satisfied at flush time. Returns None (rolling back both rows) when
+        the unique correlation_key was won by a concurrent writer - leaving
+        no orphan duplicate incident behind."""
+        session = uow.session
+        assert session is not None
+        canonical_row: Optional[Incident] = None
+        try:
+            with session.begin_nested():
+                canonical_row = self._merge_service.create_canonical(
+                    uow,
+                    bundle=incoming_bundle,
+                    job=job,
+                    correlation_key=correlation_key,
+                    strategy=profile.strategy,
+                    correlation_version=profile.correlation_version,
+                    generation=1,
+                )
+                # Flush the incident (and its event/signal associations) first
+                # so the state row's incident_id FK is satisfiable - there is
+                # no ORM relationship between the two tables, so SQLAlchemy
+                # cannot infer the insert order on its own. Both writes stay
+                # inside this savepoint, so the unique-key loser rolls back the
+                # incident as well and leaves no orphan.
+                session.flush()
+                new_state = IncidentCorrelationState(
+                    correlation_key=correlation_key,
+                    correlation_version=profile.correlation_version,
+                    strategy=profile.strategy,
+                    incident_id=canonical_row.incident_id,
+                    profile=profile.model_dump(mode="json"),
+                    generation=1,
+                    first_seen=incoming_bundle.first_seen,
+                    last_seen=incoming_bundle.last_seen,
+                    expires_at=_compute_expires_at(now, incoming_bundle.last_seen, ttl),
+                    version=1,
+                )
+                uow.correlation_state.add(new_state)
+                session.flush()
+        except IntegrityError:
+            # Savepoint auto-rolled-back: the temporary incident AND state row
+            # are both gone. Defensively expunge the incident so it can never
+            # be re-inserted on the outer commit, leaving no orphan duplicate.
+            if canonical_row is not None and canonical_row in session:
+                session.expunge(canonical_row)
+            return None
+
+        return self._result(
+            "created",
+            incoming_bundle,
+            canonical_incident=canonical_row,
+            canonical_incident_id=str(canonical_row.incident_id),
+            correlation_key=correlation_key,
+            generation=1,
+            material_changes=("new_state",),
+        )
+
+    def _merge(
+        self,
+        uow: UnitOfWork,
+        *,
+        canonical_row: Incident,
+        incoming_bundle: IncidentBundle,
+        incoming_signal_rows: Sequence[OrmDetectionSignal],
+        job: IngestionJob,
+        profile: StatefulCorrelationProfile,
+        correlation_key: str,
+        state: IncidentCorrelationState,
+        ttl: timedelta,
+        now: datetime,
+        detection_settings: DetectionSettings,
+    ) -> StatefulResolveResult:
+        session = uow.session
+        assert session is not None
+
+        if _is_noop(canonical_row, incoming_bundle, job):
+            return self._result(
+                "no_op",
+                incoming_bundle,
+                canonical_incident=canonical_row,
+                canonical_incident_id=str(canonical_row.incident_id),
+                correlation_key=correlation_key,
+                generation=int(state.generation),
+            )
+
+        available_signals = self._load_available_signals(
+            uow, canonical_row, incoming_signal_rows
+        )
+        canonical_evidence = self._reconstruct_canonical_evidence(
+            uow, canonical_row, limit=_EVIDENCE_RECONSTRUCTION_LIMIT
+        )
+        merged_row, material_changes, evidence_event_ids = (
+            self._merge_service.merge_into_canonical(
                 uow,
                 canonical_row=canonical_row,
                 incoming_bundle=incoming_bundle,
                 job=job,
                 available_signals=available_signals,
+                canonical_evidence=canonical_evidence,
                 detection_settings=detection_settings,
                 max_context_events=detection_settings.MAX_CONTEXT_EVENTS_PER_INCIDENT,
-            )
-            session.flush()
-
-            new_first_seen = min(_as_utc(state.first_seen), incoming_bundle.first_seen)
-            new_last_seen = max(_as_utc(state.last_seen), incoming_bundle.last_seen)
-            ok = uow.correlation_state.extend_active_generation(
-                correlation_key,
-                expected_version=int(state.version),
-                profile=profile.model_dump(mode="json"),
-                first_seen=new_first_seen,
-                last_seen=new_last_seen,
-                expires_at=now + ttl,
-                now=now,
-            )
-            if not ok:
-                raise StatefulCorrelationError("stateful_correlation_state_conflict")
-
-            return StatefulResolveResult(
-                status="merged",
-                canonical_incident=merged_row,
-                incoming_incident_id=incoming_bundle.incident_id,
-                canonical_incident_id=str(merged_row.incident_id),
                 correlation_key=correlation_key,
+                strategy=profile.strategy,
+                correlation_version=profile.correlation_version,
                 generation=int(state.generation),
-                material_changes=outcome.material_changes,
             )
+        )
+        session.flush()
+
+        new_first_seen = min(_as_utc(state.first_seen), incoming_bundle.first_seen)
+        new_last_seen = max(_as_utc(state.last_seen), incoming_bundle.last_seen)
+        ok = uow.correlation_state.extend_active_generation(
+            correlation_key,
+            expected_version=int(state.version),
+            profile=profile.model_dump(mode="json"),
+            first_seen=new_first_seen,
+            last_seen=new_last_seen,
+            expires_at=_compute_expires_at(now, new_last_seen, ttl),
+            now=now,
+        )
+        if not ok:
+            raise StatefulCorrelationError("stateful_correlation_state_conflict")
+        # A guarded bulk UPDATE bypasses the ORM, so the in-session state
+        # object's version is now stale; expire it so a later resolve in the
+        # same UnitOfWork re-reads the committed version.
+        session.expire(state)
+
+        return self._result(
+            "merged",
+            incoming_bundle,
+            canonical_incident=merged_row,
+            canonical_incident_id=str(merged_row.incident_id),
+            correlation_key=correlation_key,
+            generation=int(state.generation),
+            material_changes=material_changes,
+            evidence_event_ids=evidence_event_ids,
+        )
+
+    def _new_generation(
+        self,
+        uow: UnitOfWork,
+        *,
+        incoming_bundle: IncidentBundle,
+        job: IngestionJob,
+        profile: StatefulCorrelationProfile,
+        correlation_key: str,
+        state: IncidentCorrelationState,
+        ttl: timedelta,
+        now: datetime,
+    ) -> StatefulResolveResult:
+        session = uow.session
+        assert session is not None
 
         new_generation = int(state.generation) + 1
         canonical_row = self._merge_service.create_canonical(
-            uow, bundle=incoming_bundle, job=job
+            uow,
+            bundle=incoming_bundle,
+            job=job,
+            correlation_key=correlation_key,
+            strategy=profile.strategy,
+            correlation_version=profile.correlation_version,
+            generation=new_generation,
         )
         session.flush()
         ok = uow.correlation_state.replace_expired_generation(
@@ -375,21 +619,95 @@ class StatefulIncidentCorrelationService:
             profile=profile.model_dump(mode="json"),
             first_seen=incoming_bundle.first_seen,
             last_seen=incoming_bundle.last_seen,
-            expires_at=now + ttl,
+            expires_at=_compute_expires_at(now, incoming_bundle.last_seen, ttl),
             now=now,
         )
         if not ok:
             raise StatefulCorrelationError("stateful_correlation_state_conflict")
+        session.expire(state)
 
-        return StatefulResolveResult(
-            status="new_generation",
+        return self._result(
+            "new_generation",
+            incoming_bundle,
             canonical_incident=canonical_row,
-            incoming_incident_id=incoming_bundle.incident_id,
             canonical_incident_id=str(canonical_row.incident_id),
             correlation_key=correlation_key,
             generation=new_generation,
             material_changes=("new_generation",),
         )
+
+    # -- helpers -----------------------------------------------------------
+
+    @staticmethod
+    def _result(
+        status: ResolveStatus,
+        incoming_bundle: IncidentBundle,
+        *,
+        canonical_incident: Optional[Incident] = None,
+        canonical_incident_id: Optional[str] = None,
+        correlation_key: Optional[str] = None,
+        generation: Optional[int] = None,
+        material_changes: tuple[MaterialChangeCode, ...] = (),
+        evidence_event_ids: tuple[str, ...] = (),
+    ) -> StatefulResolveResult:
+        return StatefulResolveResult(
+            status=status,
+            canonical_incident=canonical_incident,
+            incoming_incident_id=incoming_bundle.incident_id,
+            canonical_incident_id=canonical_incident_id,
+            correlation_key=correlation_key,
+            generation=generation,
+            material_changes=material_changes,
+            evidence_event_ids=evidence_event_ids,
+        )
+
+    @staticmethod
+    def _reconstruct_canonical_evidence(
+        uow: UnitOfWork,
+        canonical_row: Incident,
+        *,
+        limit: int,
+    ) -> list[DetectionEvidence]:
+        """Rebuild bounded, deterministic DetectionEvidence for the canonical
+        incident from persisted canonical events (the ORM incident has no
+        evidence column, so mappers hydrate evidence empty and historical
+        evidence would otherwise vanish across cross-job merges).
+
+        Uses only safe structured fields and the sanitized message excerpt -
+        never raw records or parser_metadata.
+        """
+        incident_event_ids = sorted(
+            {e.event_id for e in canonical_row.events if not e.is_context}
+        )[:limit]
+        evidence: list[DetectionEvidence] = []
+        for event_id in incident_event_ids:
+            row = uow.canonical_events.get(event_id)
+            if row is None:
+                continue
+            original_fields: dict[str, object] = {}
+            for key, value in (
+                ("src_ip", row.src_ip),
+                ("dst_ip", row.dst_ip),
+                ("src_port", row.src_port),
+                ("dst_port", row.dst_port),
+                ("protocol", row.protocol),
+                ("action", row.action),
+            ):
+                if value is not None:
+                    original_fields[key] = value
+            quote = str(row.safe_message_excerpt or "")[:_EVIDENCE_QUOTE_MAX_CHARS]
+            source = str(row.source_name or row.parser_name or "canonical_event")
+            evidence.append(
+                DetectionEvidence(
+                    event_id=str(event_id),
+                    quote=quote,
+                    reason="persisted_incident_evidence",
+                    source=source,
+                    original_fields=original_fields,
+                    correlation_context={},
+                )
+            )
+        return evidence
 
     @staticmethod
     def _load_available_signals(

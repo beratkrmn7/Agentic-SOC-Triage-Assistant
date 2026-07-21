@@ -223,17 +223,30 @@ about Phase 6E.2's batch-local behavior above.
   public sources reaching the same exposed service must still correlate). A same-source
   incident with no compatible service/port/protocol identity produces no profile at all
   (fails closed) rather than falling back to source IP alone.
+- **One canonical service identity.** The profile uses a single service-identity token,
+  preferring the emitted per-service probe identity (`ssh_probe`, `redis_probe`,
+  `mysql_probe`, `kubelet_probe`, ...), then a *specific* classified service, and only
+  falling back to the exact destination port. Ambiguous multi-service buckets (database,
+  kubernetes, docker) are never used as a token, so Redis and MySQL never collapse into
+  one generic database campaign, and the Kubernetes API stays distinct from the kubelet.
+  `subnet_sweep` is scoped to its normalized destination subnet, so the campaign continues
+  across new individual IPs in the same subnet but not across different subnets.
 - **Persistent state, not a cache.** `IncidentCorrelationState` (one row per deterministic
   correlation key) tracks the currently active "generation" of a campaign: which incident
   is canonical, and the time window in which a new batch incident may still merge into it.
   `stateful_correlation_window_seconds` controls campaign continuity (compared against the
   incident's own event timestamps, never ingestion time); `stateful_correlation_state_ttl_seconds`
   is an unrelated, independent control over when a state row becomes eligible for cleanup.
+  A backward arrival older than the active campaign window is classified *stale* and leaves
+  the active state completely unchanged, while a distinctly later burst starts a new
+  generation.
 - **Pure merge mechanics.** `agent/correlation/merge.py` reuses the existing Phase 6E.2
   precedence function and severity/confidence scoring helpers to merge an incoming batch
   incident into the existing canonical incident, so a later, more specific signal can still
   promote the canonical incident's identity across jobs exactly as it already does within
-  one batch.
+  one batch. Because the incident row has no evidence column, bounded historical evidence is
+  reconstructed deterministically from persisted canonical events at merge time (safe
+  structured fields only), so earlier jobs' evidence never vanishes across cross-file merges.
 - **No LLM involvement.** Nothing in this foundation calls a provider, reuses a previous
   report, or decides whether an incident needs retriage. Deciding when an updated incident
   should skip or require a fresh LLM triage pass, and reusing prior reports, is explicitly

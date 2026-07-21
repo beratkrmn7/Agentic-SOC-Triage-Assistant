@@ -359,3 +359,100 @@ def test_never_falls_back_to_primary_entity_alone() -> None:
         event_ids=["f1"],
     )
     assert profile is None
+
+
+# --- Blocker 4: canonical service identity semantics ------------------------
+
+
+def test_same_source_ssh_on_22_and_2222_produce_same_profile() -> None:
+    ssh_22 = _profile(
+        [_event("s22", dst_port=22)],
+        incident_type="ssh_probe",
+        incident_family="service_probing",
+        event_ids=["s22"],
+    )
+    ssh_2222 = _profile(
+        [_event("s2222", dst_port=2222)],
+        incident_type="ssh_probe",
+        incident_family="service_probing",
+        event_ids=["s2222"],
+    )
+    assert ssh_22 is not None and ssh_2222 is not None
+    assert compute_correlation_key(ssh_22) == compute_correlation_key(ssh_2222)
+
+
+def test_redis_probe_and_mysql_probe_produce_different_profiles() -> None:
+    redis = _profile(
+        [_event("r1", dst_port=6379)],
+        incident_type="redis_probe",
+        incident_family="service_probing",
+        event_ids=["r1"],
+    )
+    mysql = _profile(
+        [_event("m1", dst_port=3306)],
+        incident_type="mysql_probe",
+        incident_family="service_probing",
+        event_ids=["m1"],
+    )
+    assert redis is not None and mysql is not None
+    # The generic "database" bucket must never collapse Redis and MySQL.
+    assert compute_correlation_key(redis) != compute_correlation_key(mysql)
+
+
+def test_two_different_unclassified_ports_produce_different_profiles() -> None:
+    port_a = _profile(
+        [_event("u1", dst_port=12345)],
+        incident_type="horizontal_scan",
+        incident_family="network_scanning",
+        event_ids=["u1"],
+    )
+    port_b = _profile(
+        [_event("u2", dst_port=54321)],
+        incident_type="horizontal_scan",
+        incident_family="network_scanning",
+        event_ids=["u2"],
+    )
+    assert port_a is not None and port_b is not None
+    assert compute_correlation_key(port_a) != compute_correlation_key(port_b)
+
+
+def test_subnet_sweep_same_subnet_different_ip_targets_same_profile() -> None:
+    sweep_a = _profile(
+        [
+            _event("sa1", dst_ip="10.0.0.5", dst_port=3389),
+            _event("sa2", dst_ip="10.0.0.9", dst_port=3389),
+        ],
+        incident_type="subnet_sweep",
+        incident_family="network_scanning",
+        target_entities=["10.0.0.5", "10.0.0.9"],
+        event_ids=["sa1", "sa2"],
+    )
+    sweep_b = _profile(
+        [_event("sb1", dst_ip="10.0.0.200", dst_port=3389)],
+        incident_type="subnet_sweep",
+        incident_family="network_scanning",
+        target_entities=["10.0.0.200"],
+        event_ids=["sb1"],
+    )
+    assert sweep_a is not None and sweep_b is not None
+    # Different individual IPs, same /24 subnet -> same campaign.
+    assert compute_correlation_key(sweep_a) == compute_correlation_key(sweep_b)
+
+
+def test_subnet_sweep_different_subnets_produce_different_profiles() -> None:
+    sweep_a = _profile(
+        [_event("sa1", dst_ip="10.0.0.5", dst_port=3389)],
+        incident_type="subnet_sweep",
+        incident_family="network_scanning",
+        target_entities=["10.0.0.5"],
+        event_ids=["sa1"],
+    )
+    sweep_c = _profile(
+        [_event("sc1", dst_ip="10.0.1.5", dst_port=3389)],
+        incident_type="subnet_sweep",
+        incident_family="network_scanning",
+        target_entities=["10.0.1.5"],
+        event_ids=["sc1"],
+    )
+    assert sweep_a is not None and sweep_c is not None
+    assert compute_correlation_key(sweep_a) != compute_correlation_key(sweep_c)
