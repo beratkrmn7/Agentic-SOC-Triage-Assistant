@@ -40,23 +40,56 @@ def _endpoint_port_sets(
     return src_ports, dst_ports
 
 
+def _protocols_compatible(
+    reference: CanonicalLogEvent,
+    candidate: CanonicalLogEvent,
+) -> bool:
+    """True unless both protocols are known and differ.
+
+    A TCP SPI response must not be related to a UDP (or other non-TCP)
+    allowed flow just because their IPs and ports line up; when either side
+    has no recorded protocol, the check is not blocking.
+    """
+    ref_protocol = str(reference.protocol).upper() if reference.protocol else None
+    cand_protocol = str(candidate.protocol).upper() if candidate.protocol else None
+    if ref_protocol and cand_protocol:
+        return ref_protocol == cand_protocol
+    return True
+
+
+def _is_likely_service_port(port: int) -> bool:
+    """True for a well-known/registered port, never an ephemeral client port.
+
+    Ports below 1024 are the IANA well-known range; ports already recognized
+    by `classify_service` (for example RDP, SSH, database ports) also count.
+    This intentionally does not special-case 443 in the service map - it
+    already falls below 1024.
+    """
+    return port < 1024 or classify_service(port) is not None
+
+
 def events_are_bidirectionally_related(
     reference: CanonicalLogEvent,
     candidate: CanonicalLogEvent,
 ) -> bool:
     """True when `candidate` is strongly related to `reference`.
 
-    Relatedness requires an exact endpoint relationship (forward or reverse
-    source/destination, including NAT-translated IPs) combined with a port
-    relationship. The port relationship may be: a full forward or reversed
-    port match, a NAT/classified-service match, or - for a confirmed reverse
-    IP relationship only - a one-sided service-port match (for example an
-    incident event's destination 443 matching the candidate's reverse source
-    443), so that differing client-side ephemeral ports on an otherwise
-    reverse HTTPS/NAT flow do not block the match. Events with no ports at
-    all (for example ICMP) may match on endpoints alone. Sharing exactly one
-    IP with no other relationship is never sufficient.
+    Relatedness requires compatible protocols (when both are known), an exact
+    endpoint relationship (forward or reverse source/destination, including
+    NAT-translated IPs), combined with a port relationship. The port
+    relationship may be: a full forward or reversed port match, a
+    NAT/classified-service match, or - for a confirmed reverse IP
+    relationship only - a one-sided match on a well-known/service-side port
+    (for example an incident event's destination 443 matching the
+    candidate's reverse source 443), so that differing client-side ephemeral
+    ports on an otherwise reverse HTTPS/NAT flow do not block the match. A
+    one-sided match on a non-service (ephemeral) port never counts. Events
+    with no ports at all (for example ICMP) may match on endpoints alone.
+    Sharing exactly one IP with no other relationship is never sufficient.
     """
+    if not _protocols_compatible(reference, candidate):
+        return False
+
     ref_src_ips, ref_dst_ips = _endpoint_ip_sets(reference)
     cand_src_ips, cand_dst_ips = _endpoint_ip_sets(candidate)
 
@@ -76,11 +109,16 @@ def events_are_bidirectionally_related(
     )
     # Reverse HTTPS/NAT flows keep the fixed service-side port but the
     # client-side ephemeral port legitimately differs between the request
-    # and response/allowed log entries. Accept a one-sided service-port
-    # match only when the IP relationship is genuinely reverse - never as a
+    # and response/allowed log entries. Accept a one-sided match only when
+    # the IP relationship is genuinely reverse AND the matched port on the
+    # reference side is itself a well-known/service port - never a
+    # coincidentally shared client ephemeral port - and never as a
     # substitute for the exact endpoint check above.
+    ref_service_src_ports = {port for port in ref_src_ports if _is_likely_service_port(port)}
+    ref_service_dst_ports = {port for port in ref_dst_ports if _is_likely_service_port(port)}
     reverse_service_port_match = reverse_ip and (
-        bool(ref_dst_ports & cand_src_ports) or bool(ref_src_ports & cand_dst_ports)
+        bool(ref_service_dst_ports & cand_src_ports)
+        or bool(ref_service_src_ports & cand_dst_ports)
     )
 
     all_ref_ports = ref_src_ports | ref_dst_ports

@@ -82,6 +82,46 @@ def test_spi_ack_rst_flow_with_related_allowed_https_flow_routes_to_store_only()
     assert decision.llm_invoked is False
 
 
+def test_spi_ack_rst_flow_with_related_allowed_udp_flow_does_not_route_to_store_only() -> None:
+    spi_event = build_pf_event(
+        "spi-response",
+        spi=True,
+        timestamp=FIXED_TIME,
+        action="block",
+        protocol="TCP",
+        tcp_flags="ACK,RST",
+        src_ip="203.0.113.5",
+        src_port=443,
+        dst_ip="192.0.2.10",
+        dst_port=51000,
+    )
+    allowed_udp_context_event = build_pf_event(
+        "allowed-udp",
+        spi=False,
+        timestamp=FIXED_TIME,
+        action="allow",
+        protocol="UDP",
+        src_ip="192.0.2.10",
+        src_port=52222,
+        dst_ip="203.0.113.5",
+        dst_port=443,
+    )
+    incident = _incident(
+        incident_family="network_anomaly",
+        event_ids=[spi_event.event_id],
+    )
+
+    decision = decide_route(
+        incident,
+        [spi_event],
+        [allowed_udp_context_event],
+        frozenset({"spi_anomaly_burst"}),
+        DetectionSettings(),
+    )
+
+    assert decision.route != "store_only"
+
+
 def test_non_fully_blocked_incident_routes_conservatively_to_individual_triage() -> None:
     blocked = build_pf_event(
         "blocked-1",

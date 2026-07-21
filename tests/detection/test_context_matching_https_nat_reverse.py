@@ -51,3 +51,48 @@ def test_events_sharing_only_one_ip_are_not_related() -> None:
     )
 
     assert events_are_bidirectionally_related(reference, candidate) is False
+
+
+def test_cross_protocol_reverse_flow_is_not_related() -> None:
+    reference = build_event(
+        "spi-response",
+        src_ip="203.0.113.5",
+        src_port=443,
+        dst_ip="192.0.2.10",
+        dst_port=51000,
+        protocol="TCP",
+        action="block",
+        tcp_flags="ACK,RST",
+    )
+    candidate = build_event(
+        "allowed-udp",
+        src_ip="192.0.2.10",
+        src_port=52222,
+        dst_ip="203.0.113.5",
+        dst_port=443,
+        protocol="UDP",
+        action="allow",
+    )
+
+    assert events_are_bidirectionally_related(reference, candidate) is False
+
+
+def test_reverse_endpoints_sharing_only_an_ephemeral_port_are_not_related() -> None:
+    reference = build_event(
+        "ref",
+        src_ip="203.0.113.5",
+        src_port=51000,
+        dst_ip="192.0.2.10",
+        dst_port=443,
+        protocol="TCP",
+    )
+    candidate = build_event(
+        "cand",
+        src_ip="192.0.2.10",
+        src_port=8080,
+        dst_ip="203.0.113.5",
+        dst_port=51000,
+        protocol="TCP",
+    )
+
+    assert events_are_bidirectionally_related(reference, candidate) is False
