@@ -88,9 +88,16 @@ class DataMapper:
             suppressed=orm_signal.suppressed,
             suppression_reason=orm_signal.suppression_reason,
             event_ids=orm_signal.event_ids,
+            # Not persisted on the signal row (no dedicated columns without a
+            # migration); reconstructed with safe, non-crashing defaults, the
+            # same "not persisted separately" convention already used by
+            # orm_to_domain_incident's evidence=[].
+            primary_entity=(orm_signal.target_entities or [""])[0],
             target_entities=orm_signal.target_entities,
             metrics=orm_signal.metrics,
-            mitre_techniques=orm_signal.mitre_techniques
+            evidence=[],
+            mitre_techniques=orm_signal.mitre_techniques,
+            tags=[],
         )
 
     @staticmethod

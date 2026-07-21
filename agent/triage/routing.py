@@ -62,6 +62,11 @@ HIGH_VALUE_RULE_IDS = frozenset(
 
 _RESPONSE_ORIENTED_FLAGS = frozenset({"ACK", "RST", "FIN"})
 
+# The only triage_verdict value deterministic_report may persist. It is a
+# valid, honest verdict label - never the internal route name
+# "deterministic_report" itself.
+DETERMINISTIC_TRIAGE_VERDICT = "suspicious_activity"
+
 
 @dataclass(frozen=True)
 class RoutingDecision:
@@ -150,14 +155,24 @@ def decide_route(
             llm_invoked=False,
         )
 
+    # A deterministic report or digest may only claim "everything was
+    # blocked" when that is literally true of every incident event. Empty
+    # evidence and mixed/unrecognized-action incidents are not safe to
+    # summarize deterministically as blocked reconnaissance, so they fall
+    # back to individual LLM triage rather than a fabricated "all blocked"
+    # narrative.
     fully_blocked = bool(incident_events) and all(
         is_blocked(event) for event in incident_events
     )
-    if (
-        fully_blocked
-        and incident.incident_family == "network_scanning"
-        and incident.severity == "low"
-    ):
+    if not fully_blocked:
+        return RoutingDecision(
+            route="individual_triage",
+            reason="not_fully_blocked_conservative",
+            triage_origin="llm",
+            llm_invoked=True,
+        )
+
+    if incident.incident_family == "network_scanning" and incident.severity == "low":
         return RoutingDecision(
             route="digest",
             reason="low_severity_fully_blocked_scanner",
@@ -211,10 +226,20 @@ def generate_deterministic_report(
         f"- **Services:** {service_summary}",
         f"- **Window:** {incident.first_seen.isoformat()} to {incident.last_seen.isoformat()}",
         "",
-        "All observed attempts were blocked by the firewall. No successful "
-        "connection, authentication, exploitation, or compromise was proven "
-        "by this deterministic analysis.",
     ]
+    if event_count > 0 and blocked_count == event_count:
+        lines.append(
+            f"All {event_count} observed event(s) were blocked by the firewall. "
+            "No successful connection, authentication, exploitation, or "
+            "compromise was proven by this deterministic analysis."
+        )
+    else:
+        lines.append(
+            f"{blocked_count} of {event_count} observed event(s) were blocked by "
+            "the firewall. No successful connection, authentication, "
+            "exploitation, or compromise was proven by this deterministic "
+            "analysis."
+        )
     return "\n".join(lines)
 
 

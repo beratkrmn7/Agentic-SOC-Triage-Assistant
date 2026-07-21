@@ -46,12 +46,16 @@ def events_are_bidirectionally_related(
 ) -> bool:
     """True when `candidate` is strongly related to `reference`.
 
-    Relatedness requires an endpoint relationship (forward or reverse
+    Relatedness requires an exact endpoint relationship (forward or reverse
     source/destination, including NAT-translated IPs) combined with a port
-    relationship (forward, reversed, or NAT-translated ports, or a
-    classified-service match). Events with no ports at all (for example
-    ICMP) may match on endpoints alone. Sharing exactly one IP with no other
-    relationship is never sufficient.
+    relationship. The port relationship may be: a full forward or reversed
+    port match, a NAT/classified-service match, or - for a confirmed reverse
+    IP relationship only - a one-sided service-port match (for example an
+    incident event's destination 443 matching the candidate's reverse source
+    443), so that differing client-side ephemeral ports on an otherwise
+    reverse HTTPS/NAT flow do not block the match. Events with no ports at
+    all (for example ICMP) may match on endpoints alone. Sharing exactly one
+    IP with no other relationship is never sufficient.
     """
     ref_src_ips, ref_dst_ips = _endpoint_ip_sets(reference)
     cand_src_ips, cand_dst_ips = _endpoint_ip_sets(candidate)
@@ -69,6 +73,14 @@ def events_are_bidirectionally_related(
     )
     reverse_ports = bool(ref_src_ports & cand_dst_ports) and bool(
         ref_dst_ports & cand_src_ports
+    )
+    # Reverse HTTPS/NAT flows keep the fixed service-side port but the
+    # client-side ephemeral port legitimately differs between the request
+    # and response/allowed log entries. Accept a one-sided service-port
+    # match only when the IP relationship is genuinely reverse - never as a
+    # substitute for the exact endpoint check above.
+    reverse_service_port_match = reverse_ip and (
+        bool(ref_dst_ports & cand_src_ports) or bool(ref_src_ports & cand_dst_ports)
     )
 
     all_ref_ports = ref_src_ports | ref_dst_ports
@@ -88,7 +100,7 @@ def events_are_bidirectionally_related(
     }
     compatible_service = bool(ref_services & cand_services)
 
-    return forward_ports or reverse_ports or compatible_service
+    return forward_ports or reverse_ports or compatible_service or reverse_service_port_match
 
 
 def find_related_context_events(
