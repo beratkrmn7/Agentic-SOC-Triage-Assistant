@@ -271,6 +271,13 @@ class AnalysisService:
 
                         llm_invoked = bool(inc_state.get("llm_invoked", True))
                         verdict = inc_state.get("triage_verdict")
+                        # Phase 6E.3: policy_adjustments has no dedicated
+                        # column (no migration); stash it in the existing
+                        # token_usage JSON column, which is otherwise unused
+                        # here.
+                        token_usage = {
+                            "policy_adjustments": inc_state.get("policy_adjustments", [])
+                        }
                         if llm_invoked:
                             new_status = "triaged" if verdict else "needs_review"
                             run = TriageRun(
@@ -282,7 +289,8 @@ class AnalysisService:
                                 confidence_score=inc_state.get("confidence_score"),
                                 incident_type=inc_state.get("incident_type"),
                                 iteration_count=inc_state.get("iteration_count", 0),
-                                status="completed" if verdict else "failed"
+                                status="completed" if verdict else "failed",
+                                token_usage=token_usage,
                             )
                         else:
                             # deterministic_report: honestly represented with
@@ -303,6 +311,7 @@ class AnalysisService:
                                 iteration_count=0,
                                 provider="deterministic",
                                 status="completed",
+                                token_usage=token_usage,
                             )
 
                         IncidentLifecycle.transition(
@@ -530,7 +539,11 @@ class AnalysisService:
                                 state["severity"] = last_run.severity
                                 state["confidence_score"] = last_run.confidence_score
                                 state["iteration_count"] = last_run.iteration_count
-                                
+                                state["policy_adjustments"] = (
+                                    (last_run.token_usage or {}).get("policy_adjustments", [])
+                                )
+
+
                                 reports = [rp for rp in job.reports if rp.triage_run_id == last_run.id]
                                 if reports:
                                     state["final_report"] = reports[0].content
@@ -788,8 +801,12 @@ class AnalysisService:
                 severity = getattr(sig, 'severity', 'low')
                 confidence = getattr(sig, 'confidence', 0.0)
                 detected_signals.append({
+                    "signal_id": getattr(sig, 'signal_id', sid),
+                    "rule_id": getattr(sig, 'rule_id', 'unknown'),
                     "detector_name": rule_name,
                     "rule_name": rule_name,
+                    "signal_type": getattr(sig, 'signal_type', 'unknown'),
+                    "signal_family": getattr(sig, 'signal_family', 'unknown'),
                     "status": "alert",
                     "message": f"{rule_name} detected. Severity: {severity}",
                     "description": f"{rule_name} detected",

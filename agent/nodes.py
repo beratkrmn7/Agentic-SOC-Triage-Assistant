@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 _triage_cache = InMemoryTriageCache()
 _circuit_breaker = None
 
+# Shared severity ranking for the exposure/policy severity-escalation cap
+# (Phase 6E.3). "none" ranks below informational so a needs_review
+# submission's forced severity=none never counts as an escalation.
+_SEVERITY_RANK = {"none": -1, "informational": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
 def get_triage_runner() -> TriageRunner:
     global _circuit_breaker
     settings = get_settings()
@@ -278,6 +283,8 @@ def triage_node(state: IncidentState) -> dict:
             triage_dict["cache_key"] = state["cache_key"]
         
         if result.submission:
+            from agent.triage.identity import lock_deterministic_identity
+            lock_deterministic_identity(result.submission, context)
             triage_dict.update({
                 "triage_submission": result.submission.model_dump(),
                 "triage_verdict": result.submission.triage_verdict.value,
@@ -287,25 +294,27 @@ def triage_node(state: IncidentState) -> dict:
                 "evidence": [], # Handled later
             })
         else:
+            # No submission at all (invalid output / provider unavailable):
+            # the deterministic incident still owns its identity.
             triage_dict.update({
                 "triage_verdict": "needs_review",
-                "incident_type": "other",
+                "incident_type": context.incident.incident_type,
                 "severity": "none",
                 "confidence_score": 0.0,
                 "evidence": []
             })
-            
+
         return triage_dict
-        
+
     except JobCancellationRequested:
         raise
     except Exception as e:
         logger.error(f"--- TRIAGE AGENT: Fatal Error -> {e} ---")
         return {
-            "triage_verdict": "needs_review", 
-            "incident_type": "other",
-            "severity": "none", 
-            "confidence_score": 0.0, 
+            "triage_verdict": "needs_review",
+            "incident_type": context.incident.incident_type,
+            "severity": "none",
+            "confidence_score": 0.0,
             "evidence": [],
             "review_reason": ReviewReason.PROVIDER_UNAVAILABLE.value,
             "errors": [str(e)]
@@ -376,28 +385,67 @@ def evidence_validation_node(state: IncidentState) -> dict:
             "review_reason": ReviewReason.NO_VALIDATED_EVIDENCE.value
         })
     else:
-        from agent.triage.guardrails import derive_network_incident_facts
-        from agent.triage.enums import TriageVerdict
+        from agent.triage.guardrails import (
+            FirewallExposureFacts,
+            ScanProbeFacts,
+            SequenceFacts,
+            derive_incident_facts,
+        )
+        from agent.triage.identity import lock_deterministic_identity
+        from agent.triage.enums import TriageSeverity, TriageVerdict
 
-        network_facts = derive_network_incident_facts(context)
-        if network_facts:
-            # Network incident identity and quantitative facts are owned by the
-            # deterministic detector, never by the model.
-            submission.incident_type = context.incident.incident_type
-            ret["incident_type"] = context.incident.incident_type
+        # The deterministic incident always owns its identity, for every
+        # family - not only network scan/probe incidents.
+        original_incident_type = submission.incident_type
+        lock_deterministic_identity(submission, context)
+        ret["incident_type"] = context.incident.incident_type
 
+        facts = derive_incident_facts(context, triage_input.signal_views)
+        policy_adjustments: list[str] = []
+        if original_incident_type != context.incident.incident_type:
+            policy_adjustments.append("deterministic_incident_type_locked")
+
+        if isinstance(facts, ScanProbeFacts) and facts.all_attempts_blocked:
+            if submission.triage_verdict == TriageVerdict.CONFIRMED_INCIDENT:
+                submission.triage_verdict = TriageVerdict.SUSPICIOUS_ACTIVITY
+                ret["triage_verdict"] = TriageVerdict.SUSPICIOUS_ACTIVITY.value
+                policy_adjustments.append("all_blocked_network_verdict_capped")
+
+        if isinstance(facts, (FirewallExposureFacts, SequenceFacts)):
+            # Firewall-only telemetry (exposure/policy or an allowed
+            # sequence) can never prove a successful application session,
+            # authentication, exploitation, or compromise by itself.
             if (
                 submission.triage_verdict == TriageVerdict.CONFIRMED_INCIDENT
-                and network_facts["all_attempts_blocked"]
+                and not facts.application_success_proven
+                and not facts.compromise_proven
             ):
                 submission.triage_verdict = TriageVerdict.SUSPICIOUS_ACTIVITY
                 ret["triage_verdict"] = TriageVerdict.SUSPICIOUS_ACTIVITY.value
-                ret["policy_adjustments"] = [
-                    "all_blocked_network_verdict_capped"
-                ]
+                policy_adjustments.append("firewall_only_confirmed_verdict_capped")
+                policy_adjustments.append("application_success_not_proven")
+                policy_adjustments.append("compromise_not_proven")
 
-            ret["triage_submission"] = submission.model_dump()
-        
+            # The provider must never escalate severity above the
+            # deterministic detection severity using firewall-only evidence.
+            deterministic_rank = _SEVERITY_RANK.get(context.incident.severity, 0)
+            submission_rank = _SEVERITY_RANK.get(submission.severity.value, 0)
+            if submission_rank > deterministic_rank:
+                submission.severity = TriageSeverity(context.incident.severity)
+                ret["severity"] = context.incident.severity
+                policy_adjustments.append("exposure_severity_capped")
+
+        if submission.triage_verdict == TriageVerdict.NEEDS_REVIEW:
+            submission.severity = TriageSeverity.NONE
+            submission.confidence_score = 0.0
+            ret["severity"] = "none"
+            ret["confidence_score"] = 0.0
+
+        if policy_adjustments:
+            ret["policy_adjustments"] = sorted(set(policy_adjustments))
+
+        ret["triage_submission"] = submission.model_dump()
+
     return ret
 
 def action_recommendation_node(state: IncidentState) -> dict:
@@ -411,21 +459,27 @@ def action_recommendation_node(state: IncidentState) -> dict:
     actions = []
     mitre_techniques = []
 
-    network_facts = None
+    facts = None
     incident_dict = state.get("incident")
+    triage_input_dict = state.get("safe_triage_input")
     if incident_dict:
         try:
-            from agent.triage.guardrails import derive_network_incident_facts
-            from agent.triage.models import TriageIncidentContext
+            from agent.triage.guardrails import derive_incident_facts
+            from agent.triage.models import TriageIncidentContext, TriageInput
 
-            network_facts = derive_network_incident_facts(
-                TriageIncidentContext(**incident_dict)
-            )
+            context = TriageIncidentContext(**incident_dict)
+            signal_views = []
+            if triage_input_dict:
+                try:
+                    signal_views = TriageInput(**triage_input_dict).signal_views
+                except Exception:
+                    signal_views = []
+            facts = derive_incident_facts(context, signal_views)
         except Exception:
-            logger.warning("Unable to derive deterministic network facts")
-    if network_facts:
-        incident_type = network_facts["incident_type"]
-    
+            logger.warning("Unable to derive deterministic incident facts")
+    if facts is not None:
+        incident_type = facts.incident_type
+
     MITRE_MAP = {
         "bruteforce_failed": ["T1110 - Brute Force"],
         "bruteforce_success": ["T1110 - Brute Force", "T1078 - Valid Accounts"],
@@ -458,11 +512,33 @@ def action_recommendation_node(state: IncidentState) -> dict:
             actions.append("No immediate action required.")
             actions.append("Consider tuning alert rules if this alert triggers frequently for normal traffic.")
     elif verdict in ["suspicious_activity", "confirmed_incident"]:
-        if network_facts and network_facts["all_attempts_blocked"]:
+        from agent.triage.guardrails import FirewallExposureFacts, ScanProbeFacts, SequenceFacts
+
+        if isinstance(facts, ScanProbeFacts) and facts.all_attempts_blocked:
             actions.extend([
                 "Review firewall and network telemetry for continued probing from the source IP.",
                 "Review relevant authentication logs for any separate successful activity.",
                 "Consider temporarily blocking or rate-limiting the source IP at the network edge.",
+            ])
+        elif isinstance(facts, SequenceFacts):
+            # Blocked-then-allowed sequence: investigate, do not auto-isolate.
+            actions.extend([
+                "Review service, application, and authentication logs for the allowed connection.",
+                "Validate whether the allowed flow was expected and authorized.",
+                "Check related sessions from the same source for suspicious activity.",
+                "Review the firewall policy that permitted the connection.",
+            ])
+        elif isinstance(facts, FirewallExposureFacts):
+            # Exposure/policy: focus on firewall/NAT policy and service
+            # logs. Never recommend host isolation or a mandatory password
+            # reset from firewall-only evidence alone.
+            actions.extend([
+                "Verify whether the firewall/NAT rule permitting this access is intended.",
+                "Confirm the source falls within an approved/allowed range.",
+                "Restrict public access or require a VPN/allowlist for this service if it is not intended to be public.",
+                "Review service and authentication logs for any successful session.",
+                "Review the configuration of the exposed service.",
+                "Inspect related flow telemetry for the same source and destination.",
             ])
         elif incident_type == "sql_injection":
             actions.extend(["SOC Analyst should evaluate updating WAF rules to block signature.", "SOC Analyst should verify database integrity.", "SOC Analyst should perform endpoint validation."])
@@ -568,33 +644,50 @@ def reporter_node(state: IncidentState) -> dict:
         submission.confidence_score = 0.0
 
     deterministic_facts = None
+    deterministic_confidence = None
     incident_dict = state.get("incident")
     if incident_dict:
         try:
             from agent.triage.guardrails import (
-                build_deterministic_network_summary,
-                derive_network_incident_facts,
+                FirewallExposureFacts,
+                ScanProbeFacts,
+                SequenceFacts,
+                build_deterministic_summary,
+                derive_incident_facts,
             )
-            from agent.triage.models import TriageIncidentContext
+            from agent.triage.identity import lock_deterministic_identity
+            from agent.triage.models import TriageIncidentContext, TriageInput
 
             context = TriageIncidentContext(**incident_dict)
-            deterministic_facts = derive_network_incident_facts(context)
-            if deterministic_facts:
-                submission.incident_type = deterministic_facts["incident_type"]
-                submission.summary = build_deterministic_network_summary(
-                    deterministic_facts
-                )
+            deterministic_confidence = context.incident.confidence
+            triage_input_dict = state.get("safe_triage_input")
+            signal_views = []
+            if triage_input_dict:
+                try:
+                    signal_views = TriageInput(**triage_input_dict).signal_views
+                except Exception:
+                    signal_views = []
+
+            lock_deterministic_identity(submission, context)
+            deterministic_facts = derive_incident_facts(context, signal_views)
+
+            # For scan/probe, exposure/policy, and allowed-sequence
+            # incidents, the report summary must be the deterministic
+            # summary, never an untrusted model summary that may overstate
+            # what firewall-only telemetry proves.
+            if isinstance(deterministic_facts, (ScanProbeFacts, FirewallExposureFacts, SequenceFacts)):
+                submission.summary = build_deterministic_summary(deterministic_facts)
         except Exception:
-            logger.warning("Unable to render deterministic network facts")
+            logger.warning("Unable to render deterministic incident facts")
 
     valid_ev = [EvidenceValidationResult(**e) for e in state.get("validated_evidence", [])]
     rej_ev = [EvidenceValidationResult(**e) for e in state.get("rejected_evidence", [])]
     claims = [TriageClaim(**c) for c in state.get("validated_claims", [])]
-    
+
     metadata = {
         "title": f"Incident {state['incident_id']} ({state.get('incident_type', 'unknown')})"
     }
-    
+
     report = generate_report(
         submission=submission,
         validated_evidence=valid_ev + rej_ev,
@@ -603,6 +696,7 @@ def reporter_node(state: IncidentState) -> dict:
         review_reason=state.get("review_reason", "none"),
         recommended_actions=state.get("recommended_actions", []),
         deterministic_facts=deterministic_facts,
+        deterministic_confidence=deterministic_confidence,
     )
-    
+
     return {"final_report": report}

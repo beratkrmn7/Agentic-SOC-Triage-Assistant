@@ -270,8 +270,8 @@ class Settings(BaseSettings):
     circuit_breaker_reset_seconds: int = Field(default=60, ge=1)
     triage_cache_enabled: bool = True
     triage_cache_ttl_seconds: int = Field(default=3600, ge=0)
-    triage_prompt_version: str = "phase4-v2"
-    triage_schema_version: str = "1.0.0"
+    triage_prompt_version: str = "phase6e3-v1"
+    triage_schema_version: str = "1.1.0"
 
     # Phase 5A: Persistence Settings
     database_url: str = "sqlite:///soc_triage.db"

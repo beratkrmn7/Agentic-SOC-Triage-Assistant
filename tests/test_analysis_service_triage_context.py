@@ -76,8 +76,12 @@ def test_analysis_service_builds_complete_triage_context() -> None:
     assert state["canonical_events"][0]["event_id"] == primary.event_id
     assert state["detected_signals"] == [
         {
+            "signal_id": "signal-1",
+            "rule_id": "network_scan_horizontal",
             "detector_name": "Horizontal Port Scan",
             "rule_name": "Horizontal Port Scan",
+            "signal_type": "horizontal_scan",
+            "signal_family": "network_scanning",
             "status": "alert",
             "message": "Horizontal Port Scan detected. Severity: high",
             "description": "Horizontal Port Scan detected",

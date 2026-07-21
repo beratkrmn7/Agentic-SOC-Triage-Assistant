@@ -32,7 +32,7 @@ def test_system_prompt_compacts_empty_fields_without_losing_safe_event_data() ->
 
     prompt = build_system_prompt(triage_input)
 
-    assert TRIAGE_PROMPT_VERSION == "phase4-v2"
+    assert TRIAGE_PROMPT_VERSION == "phase6e3-v1"
     assert "<UNTRUSTED_INCIDENT_DATA>" in prompt
     assert "BLOCK TCP flags=SYN" in prompt
     assert '"total_events":18' in prompt

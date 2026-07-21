@@ -1,6 +1,97 @@
 from typing import List, Dict, Any, Optional
 from agent.triage.models import TriageSubmission, EvidenceValidationResult, TriageClaim
 from agent.triage.enums import TriageVerdict
+from agent.triage.guardrails import (
+    FirewallExposureFacts,
+    IncidentFacts,
+    ScanProbeFacts,
+    SequenceFacts,
+)
+
+
+def _format_confidence(value: Optional[float]) -> str:
+    if value is None:
+        return "unavailable"
+    return f"{value:.2f}"
+
+
+def _render_scan_probe_facts(facts: ScanProbeFacts) -> List[str]:
+    ports = ", ".join(str(port) for port in facts.destination_ports) or "unknown"
+    protocols = ", ".join(facts.protocols) or "unknown"
+    return [
+        "\n## Deterministic Incident Facts",
+        f"- Source: {facts.primary_entity}",
+        f"- Event count: {facts.event_count}",
+        f"- Distinct target count: {facts.distinct_target_count}",
+        f"- Protocols: {protocols}",
+        f"- Destination ports: {ports}",
+        f"- All attempts blocked: {'yes' if facts.all_attempts_blocked else 'no'}",
+        f"- SYN-only TCP traffic: {'yes' if facts.syn_only else 'no'}",
+    ]
+
+
+def _render_exposure_facts(facts: FirewallExposureFacts) -> List[str]:
+    dest_ports = ", ".join(str(port) for port in facts.destination_ports) or "none"
+    translated_ports = (
+        ", ".join(str(port) for port in facts.translated_destination_ports) or "none"
+    )
+    zones = (
+        ", ".join(facts.inbound_zones) + " -> " + ", ".join(facts.outbound_zones)
+        if facts.inbound_zones or facts.outbound_zones
+        else "unknown"
+    )
+    lines = [
+        "\n## Deterministic Firewall Exposure Facts",
+        f"- Exposure type: {facts.incident_type}",
+        f"- Service: {facts.service or 'unclassified'}",
+        f"- Source: {facts.primary_entity} (external sources: {facts.external_source_count})",
+        f"- Effective destination(s): {', '.join(facts.destination_ips) or 'unknown'}",
+        f"- Destination ports: {dest_ports}",
+        f"- Translated destination ports: {translated_ports}",
+        f"- Zones (inbound -> outbound): {zones}",
+        f"- NAT observed: {'yes' if facts.nat_event_count else 'no'}",
+        f"- Allowed events: {facts.allowed_event_count} | Blocked events: {facts.blocked_event_count}",
+    ]
+    if facts.total_packets or facts.total_bytes or facts.max_duration_ms:
+        lines.append(
+            "- Packets/Bytes/Max duration(ms): "
+            f"{facts.total_packets}/{facts.total_bytes}/{facts.max_duration_ms}"
+        )
+    lines.extend(
+        [
+            f"- Policy exposure observed: {'yes' if facts.policy_allow_observed else 'no'}",
+            f"- Transport activity observed: {'yes' if facts.transport_activity_observed else 'no'}",
+            "- Application success proven: "
+            f"{'yes' if facts.application_success_proven else 'no/unknown'}",
+            f"- Compromise proven: {'yes' if facts.compromise_proven else 'no'}",
+        ]
+    )
+    return lines
+
+
+def _render_sequence_facts(facts: SequenceFacts) -> List[str]:
+    return [
+        "\n## Deterministic Sequence Facts",
+        f"- Sequence type(s): {', '.join(facts.sequence_signal_types) or facts.incident_type}",
+        f"- Source: {facts.primary_entity}",
+        f"- Blocked events: {facts.blocked_event_count} | Allowed events: {facts.allowed_event_count}",
+        "- Application success proven: "
+        f"{'yes' if facts.application_success_proven else 'no/unknown'}",
+        f"- Compromise proven: {'yes' if facts.compromise_proven else 'no'}",
+    ]
+
+
+def _render_deterministic_facts(facts: Optional[IncidentFacts]) -> List[str]:
+    if facts is None:
+        return []
+    if isinstance(facts, ScanProbeFacts):
+        return _render_scan_probe_facts(facts)
+    if isinstance(facts, FirewallExposureFacts):
+        return _render_exposure_facts(facts)
+    if isinstance(facts, SequenceFacts):
+        return _render_sequence_facts(facts)
+    return []
+
 
 def generate_report(
     submission: TriageSubmission,
@@ -9,65 +100,51 @@ def generate_report(
     incident_metadata: Dict[str, Any],
     review_reason: str,
     recommended_actions: Optional[List[str]] = None,
-    deterministic_facts: Optional[Dict[str, Any]] = None,
+    deterministic_facts: Optional[IncidentFacts] = None,
+    deterministic_confidence: Optional[float] = None,
 ) -> str:
-    
+
     valid_ev_ids = [e.evidence_id for e in validated_evidence if e.status == "validated"]
     rejected_ev = [e for e in validated_evidence if e.status == "rejected"]
-    
+
     report = []
     report.append(f"# Triage Report: {incident_metadata.get('title', 'Unknown Incident')}")
     report.append(f"**Verdict:** {submission.triage_verdict.value.upper()}")
     report.append(f"**Severity:** {submission.severity.value.upper()}")
-    report.append(f"**Confidence:** {submission.confidence_score}")
-    
+    report.append(
+        f"**Detection confidence score:** {_format_confidence(deterministic_confidence)}"
+    )
+    report.append(
+        f"**Triage confidence score:** {_format_confidence(submission.confidence_score)}"
+    )
+
     if submission.triage_verdict == TriageVerdict.NEEDS_REVIEW:
         report.append(f"**Review Reason:** {review_reason}")
-        
+
     report.append("\n## Triage Summary")
     report.append(submission.summary)
 
-    if deterministic_facts:
-        ports = ", ".join(
-            str(port) for port in deterministic_facts["destination_ports"]
-        ) or "unknown"
-        protocols = ", ".join(deterministic_facts["protocols"]) or "unknown"
-        report.append("\n## Deterministic Incident Facts")
-        report.append(f"- Source: {deterministic_facts['primary_entity']}")
-        report.append(f"- Event count: {deterministic_facts['event_count']}")
-        report.append(
-            "- Distinct target count: "
-            f"{deterministic_facts['distinct_target_count']}"
-        )
-        report.append(f"- Protocols: {protocols}")
-        report.append(f"- Destination ports: {ports}")
-        report.append(
-            "- All attempts blocked: "
-            f"{'yes' if deterministic_facts['all_attempts_blocked'] else 'no'}"
-        )
-        report.append(
-            f"- SYN-only TCP traffic: {'yes' if deterministic_facts['syn_only'] else 'no'}"
-        )
-    
+    report.extend(_render_deterministic_facts(deterministic_facts))
+
     report.append("\n## Validated Evidence")
     if valid_ev_ids:
         for ev_id in valid_ev_ids:
             report.append(f"- Evidence ID: {ev_id}")
     else:
         report.append("No validated evidence.")
-        
+
     if rejected_ev:
         report.append("\n## Rejected Evidence Summary")
         for ev in rejected_ev:
             report.append(f"- ID: {ev.evidence_id} | Reason: {ev.rejection_reason.value if ev.rejection_reason else 'unknown'}")
-            
+
     report.append("\n## Accepted Claims")
     if accepted_claims:
         for claim in accepted_claims:
             report.append(f"- {claim.claim_type.value}: {claim.statement}")
     else:
         report.append("No high-impact claims accepted.")
-        
+
     report.append("\n## Recommended Analyst Actions")
     if recommended_actions:
         for action in recommended_actions:
@@ -79,5 +156,5 @@ def generate_report(
         report.append("- Review related authentication logs.")
     else:
         report.append("- Review evidence and verify claims manually.")
-        
+
     return "\n".join(report)
