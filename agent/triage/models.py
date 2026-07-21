@@ -26,6 +26,38 @@ class SafeEventView(BaseModel):
     parser_name: str
     source_name: str
     sanitized_message_excerpt: Optional[str] = None
+    # Phase 6E.3: bounded structured network fields already present on
+    # CanonicalLogEvent. Never raw records, full source lines,
+    # parser_metadata, secrets, or unbounded FQDN/username collections.
+    bytes: Optional[int] = None
+    packets: Optional[int] = None
+    duration_ms: Optional[int] = None
+    inbound_interface: Optional[str] = None
+    outbound_interface: Optional[str] = None
+    inbound_zone: Optional[str] = None
+    outbound_zone: Optional[str] = None
+    nat_type: Optional[str] = None
+    translated_src_ip: Optional[str] = None
+    translated_dst_ip: Optional[str] = None
+    translated_src_port: Optional[int] = None
+    translated_dst_port: Optional[int] = None
+    flow_direction: str = "unknown"
+
+class TriageSignalView(BaseModel):
+    """Bounded, typed metadata for one signal attached to the correlated
+    incident (Phase 6E.2 may attach signals from several rule families to
+    one incident; string-only signal_summaries cannot express that)."""
+
+    signal_id: str
+    rule_id: str
+    rule_name: str
+    signal_type: str
+    signal_family: str
+    severity: str
+    confidence: float
+    matched_event_ids: List[str] = Field(default_factory=list)
+    mitre_techniques: List[str] = Field(default_factory=list)
+
 
 class EvidenceCandidate(BaseModel):
     evidence_id: str
@@ -50,6 +82,7 @@ class TriageInput(BaseModel):
     target_entities: List[str] = Field(default_factory=list)
     deterministic_metrics: dict[str, Any] = Field(default_factory=dict)
     signal_summaries: List[str] = Field(default_factory=list)
+    signal_views: List[TriageSignalView] = Field(default_factory=list)
     candidate_evidence: List[EvidenceCandidate] = Field(default_factory=list)
     limited_context_events: List[SafeEventView] = Field(default_factory=list)
     allowed_mitre_candidates: List[str] = Field(default_factory=list)
