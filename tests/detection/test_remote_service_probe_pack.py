@@ -554,7 +554,7 @@ def test_existing_multi_service_sweep_remains_functional() -> None:
     assert signals[0].signal_type == "multi_service_sweep"
 
 
-def test_smb_precedence_absorbs_only_generic_horizontal_scan() -> None:
+def test_smb_precedence_correlates_scan_and_scanner_signals_into_one_incident() -> None:
     registry = RuleRegistry()
     registry.register(SmbProbeRule())
     registry.register(HorizontalScanRule())
@@ -569,9 +569,18 @@ def test_smb_precedence_absorbs_only_generic_horizontal_scan() -> None:
 
     result = DetectionEngine(registry=registry, settings=settings).analyze(events)
 
+    # Phase 6E.2: no cross-rule signal is deleted here. All three remain in
+    # DetectionResult.signals and correlate into one incident anchored by
+    # the more specific smb_probe signal.
     assert {signal.signal_type for signal in result.signals} == {
         "smb_probe",
+        "horizontal_scan",
         "repeated_blocked_scanner",
+    }
+    assert len(result.incidents) == 1
+    assert result.incidents[0].incident_type == "smb_probe"
+    assert set(result.incidents[0].signal_ids) == {
+        signal.signal_id for signal in result.signals
     }
 
 

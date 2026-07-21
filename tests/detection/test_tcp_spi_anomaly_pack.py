@@ -587,9 +587,18 @@ def test_service_probe_precedence_and_tcp_anomaly_coexistence_are_preserved() ->
 
     result = DetectionEngine(registry=registry, settings=_settings()).analyze(events)
 
+    # Phase 6E.2: no cross-rule signal is deleted here. All three remain in
+    # DetectionResult.signals and correlate into one incident anchored by
+    # the more specific rdp_probe signal.
     assert {signal.signal_type for signal in result.signals} == {
         "rdp_probe",
+        "horizontal_scan",
         "tcp_syn_rst_anomaly",
+    }
+    assert len(result.incidents) == 1
+    assert result.incidents[0].incident_type == "rdp_probe"
+    assert set(result.incidents[0].signal_ids) == {
+        signal.signal_id for signal in result.signals
     }
 
 

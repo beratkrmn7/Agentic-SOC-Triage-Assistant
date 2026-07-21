@@ -404,9 +404,17 @@ class DetectionSettings(BaseModel):
     )
 
     # Incident Merging
-    INCIDENT_MERGE_WINDOW_SECONDS: int = int(os.getenv("INCIDENT_MERGE_WINDOW_SECONDS", "300"))
-    INCIDENT_EVENT_OVERLAP_THRESHOLD: float = float(os.getenv("INCIDENT_EVENT_OVERLAP_THRESHOLD", "0.70"))
-    MAX_CONTEXT_EVENTS_PER_INCIDENT: int = int(os.getenv("MAX_CONTEXT_EVENTS_PER_INCIDENT", "50"))
+    INCIDENT_MERGE_WINDOW_SECONDS: int = Field(
+        default=int(os.getenv("INCIDENT_MERGE_WINDOW_SECONDS", "300")), gt=0
+    )
+    INCIDENT_EVENT_OVERLAP_THRESHOLD: float = Field(
+        default=float(os.getenv("INCIDENT_EVENT_OVERLAP_THRESHOLD", "0.70")),
+        ge=0.0,
+        le=1.0,
+    )
+    MAX_CONTEXT_EVENTS_PER_INCIDENT: int = Field(
+        default=int(os.getenv("MAX_CONTEXT_EVENTS_PER_INCIDENT", "50")), gt=0
+    )
 
     @field_validator("INTERNAL_LATERAL_SCAN_PORTS")
     @classmethod
