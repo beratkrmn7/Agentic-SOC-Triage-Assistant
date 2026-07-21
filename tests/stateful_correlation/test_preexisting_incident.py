@@ -19,6 +19,7 @@ from sqlalchemy.orm import sessionmaker
 
 from agent.application.stateful_correlation_service import StatefulIncidentCorrelationService
 from agent.config import Settings
+from agent.detection.models import IncidentBundle
 from agent.persistence.mappers import DataMapper
 from agent.persistence.orm_models import Base, IngestionJob
 from agent.persistence.unit_of_work import UnitOfWork
@@ -268,3 +269,152 @@ def test_expired_state_with_identical_incoming_id_does_not_fake_new_generation(
         )
 
     assert after == before
+
+
+# --- Blocker 2 (round 3): reconcile pre-existing Incident associations -----
+
+
+def test_richer_existing_incident_smaller_incoming_bundle_does_not_regress(
+    session_factory,
+) -> None:
+    settings = Settings(stateful_correlation_enabled=True)
+    service = StatefulIncidentCorrelationService()
+
+    events = [make_event("a1"), make_event("a2")]
+    signal_a = make_signal("SIG-A", ["a1"])
+    signal_b = make_signal("SIG-B", ["a2"])
+
+    with UnitOfWork(session_factory=session_factory, settings=settings) as uow:
+        job_a = IngestionJob(id="job-a", status="completed")
+        uow.ingestion_jobs.add(job_a)
+        for event in events:
+            uow.canonical_events.add(DataMapper.domain_event_to_orm(event))
+        orm_signal_a = DataMapper.domain_signal_to_orm(signal_a)
+        orm_signal_b = DataMapper.domain_signal_to_orm(signal_b)
+        uow.detection_signals.add(orm_signal_a)
+        uow.detection_signals.add(orm_signal_b)
+        job_a.signals.append(orm_signal_a)
+        job_a.signals.append(orm_signal_b)
+
+        # A richer existing incident: 2 events, 2 signals, no stateful
+        # metrics stamped yet (as if persisted by plain batch persistence).
+        rich_bundle = IncidentBundle(
+            incident_id="INC-A", incident_type="rdp_probe", incident_family="service_probing",
+            title="t", severity="medium", confidence=0.6, first_seen=FIXED, last_seen=FIXED,
+            primary_entity="203.0.113.10", target_entities=["10.0.0.5"],
+            signal_ids=["SIG-A", "SIG-B"], event_ids=["a1", "a2"], context_event_ids=[],
+            evidence=[], metrics={"primary_signal_id": "SIG-A"}, mitre_techniques=[],
+            merge_key="m1",
+        )
+        orm_incident = DataMapper.domain_incident_to_orm(rich_bundle)
+        uow.incidents.add(orm_incident)
+        orm_incident.jobs.append(job_a)
+        uow.session.flush()
+
+    with UnitOfWork(session_factory=session_factory, settings=settings) as uow:
+        job_b = IngestionJob(id="job-b", status="completed")
+        uow.ingestion_jobs.add(job_b)
+
+        # A smaller incoming bundle - only one of the two existing signals
+        # and events.
+        small_bundle = make_incident("INC-A", signal_a, [events[0]])
+
+        canonical_row, changed = service._merge_service.create_canonical(
+            uow,
+            bundle=small_bundle,
+            job=job_b,
+            correlation_key="scv1:test-key",
+            strategy="source_service_campaign",
+            correlation_version="1",
+            generation=1,
+        )
+
+        assert changed is True  # new job + first-time stateful stamping
+        event_ids = {e.event_id for e in canonical_row.events if not e.is_context}
+        signal_ids = {s.signal_id for s in canonical_row.signals}
+        assert event_ids == {"a1", "a2"}, "nothing removed by a smaller incoming bundle"
+        assert signal_ids == {"SIG-A", "SIG-B"}
+        metrics = dict(canonical_row.metrics)
+        assert metrics["total_events"] == 2
+        assert metrics["correlated_signal_count"] == 2
+
+
+def test_existing_incident_with_additional_event_and_signal_reconciles_and_updates_metrics(
+    session_factory,
+) -> None:
+    settings = Settings(stateful_correlation_enabled=True)
+    service = StatefulIncidentCorrelationService()
+
+    events = [make_event("a1")]
+    signal_a = make_signal("SIG-A", ["a1"])
+
+    with UnitOfWork(session_factory=session_factory, settings=settings) as uow:
+        _persist_plain_incident(
+            uow, incident_id="INC-A", signal=signal_a, events=events, job_id="job-a"
+        )
+
+    with UnitOfWork(session_factory=session_factory, settings=settings) as uow:
+        job_b = IngestionJob(id="job-b", status="completed")
+        uow.ingestion_jobs.add(job_b)
+        extra_event = make_event("b1")
+        uow.canonical_events.add(DataMapper.domain_event_to_orm(extra_event))
+        extra_signal = make_signal("SIG-B", ["b1"])
+        orm_extra_signal = DataMapper.domain_signal_to_orm(extra_signal)
+        uow.detection_signals.add(orm_extra_signal)
+        job_b.signals.append(orm_extra_signal)
+        uow.session.flush()
+
+        incoming_bundle = IncidentBundle(
+            incident_id="INC-A", incident_type="rdp_probe", incident_family="service_probing",
+            title="t", severity="medium", confidence=0.6, first_seen=FIXED, last_seen=FIXED,
+            primary_entity="203.0.113.10", target_entities=["10.0.0.5"],
+            signal_ids=["SIG-A", "SIG-B"], event_ids=["a1", "b1"], context_event_ids=[],
+            evidence=[], metrics={"primary_signal_id": "SIG-A"}, mitre_techniques=[],
+            merge_key="m1",
+        )
+
+        canonical_row, changed = service._merge_service.create_canonical(
+            uow,
+            bundle=incoming_bundle,
+            job=job_b,
+            correlation_key="scv1:test-key",
+            strategy="source_service_campaign",
+            correlation_version="1",
+            generation=1,
+        )
+
+        assert changed is True
+        event_ids = {e.event_id for e in canonical_row.events if not e.is_context}
+        signal_ids = {s.signal_id for s in canonical_row.signals}
+        assert event_ids == {"a1", "b1"}, "missing association was not added"
+        assert signal_ids == {"SIG-A", "SIG-B"}, "missing association was not added"
+        metrics = dict(canonical_row.metrics)
+        assert metrics["total_events"] == 2
+        assert metrics["correlated_signal_count"] == 2
+
+        version_after_reconcile = int(canonical_row.version)
+
+    with UnitOfWork(session_factory=session_factory, settings=settings) as uow:
+        # Repeating the now-reconciled bundle (same job, same IDs) must be a
+        # true no-op with no further version increment.
+        job_b = uow.ingestion_jobs.get("job-b")
+        repeat_bundle = IncidentBundle(
+            incident_id="INC-A", incident_type="rdp_probe", incident_family="service_probing",
+            title="t", severity="medium", confidence=0.6, first_seen=FIXED, last_seen=FIXED,
+            primary_entity="203.0.113.10", target_entities=["10.0.0.5"],
+            signal_ids=["SIG-A", "SIG-B"], event_ids=["a1", "b1"], context_event_ids=[],
+            evidence=[], metrics={"primary_signal_id": "SIG-A"}, mitre_techniques=[],
+            merge_key="m1",
+        )
+        canonical_row, changed_again = service._merge_service.create_canonical(
+            uow,
+            bundle=repeat_bundle,
+            job=job_b,
+            correlation_key="scv1:test-key",
+            strategy="source_service_campaign",
+            correlation_version="1",
+            generation=1,
+        )
+
+        assert changed_again is False
+        assert int(canonical_row.version) == version_after_reconcile
