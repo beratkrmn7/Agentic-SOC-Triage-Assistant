@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal, Optional, Sequence, cast
+from typing import Any, Iterable, Literal, Optional, Sequence, cast
 
 from sqlalchemy.exc import IntegrityError
 
@@ -140,44 +140,84 @@ def _is_noop(canonical_row: Incident, incoming_bundle: IncidentBundle, job: Inge
     return True
 
 
+def _bounded_context_ids(
+    existing_context_ids: Iterable[str],
+    incoming_context_ids: Iterable[str],
+    final_event_ids: set[str],
+    *,
+    max_context_events: int,
+) -> list[str]:
+    """The deterministic bounded context set: union of whatever context IDs
+    are already persisted plus whatever the incoming bundle proposes, minus
+    anything that is (now) a real incident event, sorted and capped - the
+    same bounding formula the pure merge function already applies when both
+    sides come from an in-memory IncidentBundle merge."""
+    return sorted(
+        (set(existing_context_ids) | set(incoming_context_ids)) - final_event_ids
+    )[:max_context_events]
+
+
 def _reconcile_associations(
     canonical_row: Incident,
     *,
     event_ids: Sequence[str],
     context_event_ids: Sequence[str],
     signal_ids: Sequence[str],
-) -> bool:
-    """Add only missing IncidentEvent/IncidentSignal association rows,
-    promoting an existing context row to a real incident event when an ID
-    appears in `event_ids`. Never creates duplicate rows. Returns True when
-    anything was added or promoted, so callers can fold this into their
-    material-change determination.
+) -> tuple[bool, bool]:
+    """Synchronize IncidentEvent/IncidentSignal association rows to exactly
+    match the final bounded sets. Returns (events_or_signals_changed,
+    context_changed).
+
+    - Every ID in `event_ids` ends up persisted with is_context=False -
+      added if missing, promoted (not duplicated) if it was previously
+      context-only.
+    - Every ID in `context_event_ids` ends up persisted with is_context=True
+      if not already a real event - added if missing.
+    - Persisted context-only rows outside `context_event_ids` are removed
+      (deterministic bound synchronization, not add-only). A real
+      is_context=False event row is NEVER removed.
+    - Missing signal_ids are added; nothing is ever removed from signals.
 
     `event_ids` and `context_event_ids` must already be disjoint - guaranteed
-    by IncidentBundle's own validator - otherwise a freshly-added event row
-    could also be appended a second time as a duplicate context row.
+    by IncidentBundle's own validator, and by `_bounded_context_ids` - so a
+    freshly-added event row is never also appended as a duplicate context row.
     """
-    changed = False
+    context_event_id_set = set(context_event_ids)
     existing_rows_by_id = {row.event_id: row for row in canonical_row.events}
+    before_context_ids = {
+        row.event_id for row in canonical_row.events if row.is_context
+    }
+
+    events_or_signals_changed = False
     for event_id in event_ids:
         row = existing_rows_by_id.get(event_id)
         if row is None:
             canonical_row.events.append(IncidentEvent(event_id=event_id, is_context=False))
-            changed = True
+            events_or_signals_changed = True
         elif row.is_context:
             row.is_context = False
-            changed = True
-    for event_id in context_event_ids:
+            events_or_signals_changed = True
+    for event_id in context_event_id_set:
         if event_id not in existing_rows_by_id:
             canonical_row.events.append(IncidentEvent(event_id=event_id, is_context=True))
-            changed = True
+
+    # Deterministic bound synchronization: remove context-only rows that
+    # fell outside the final bounded set. Real incident events are never
+    # touched here (only rows still is_context=True are candidates).
+    for row in list(canonical_row.events):
+        if row.is_context and row.event_id not in context_event_id_set:
+            canonical_row.events.remove(row)
+
+    after_context_ids = {row.event_id for row in canonical_row.events if row.is_context}
+    context_changed = before_context_ids != after_context_ids
 
     existing_signal_ids = {s.signal_id for s in canonical_row.signals}
     for signal_id in signal_ids:
         if signal_id not in existing_signal_ids:
             canonical_row.signals.append(IncidentSignal(signal_id=signal_id))
-            changed = True
-    return changed
+            events_or_signals_changed = True
+
+    return events_or_signals_changed, context_changed
 
 
 def _apply_stateful_metrics(
@@ -226,6 +266,7 @@ class StatefulIncidentMergeService:
         strategy: str,
         correlation_version: str,
         generation: int,
+        max_context_events: int,
     ) -> tuple[Incident, bool]:
         """Return the canonical Incident row for `bundle`, plus whether
         anything material changed on it.
@@ -233,15 +274,17 @@ class StatefulIncidentMergeService:
         When an Incident with this exact deterministic incident_id already
         exists (e.g. persisted earlier by plain batch-local persistence, or
         by a previous stateful resolve), it is reused rather than
-        duplicated. Its relational associations are reconciled (missing
-        events/context/signals added, a context row promoted when now
-        covered by `bundle.event_ids`, never duplicated) and the full
-        stateful metric set is recomputed from the FINAL persisted/union
-        state - never from `bundle` alone, so a smaller incoming bundle can
-        never regress a richer existing incident's counts. A new job
-        association is added, and `Incident.version` bumps exactly once for
-        any real change, rather than silently skipping all of that
-        bookkeeping the way a plain early return would.
+        duplicated. Its relational associations are reconciled to exactly
+        match the deterministic bounded union of its own existing context
+        set and `bundle`'s (missing events/context/signals added, stale
+        context rows removed, a context row promoted when now covered by
+        `bundle.event_ids` - never duplicated), and the full stateful metric
+        set is recomputed from the FINAL persisted/union state - never from
+        `bundle` alone, so a smaller incoming bundle can never regress a
+        richer existing incident's counts. A new job association is added,
+        and `Incident.version` bumps exactly once for any real change
+        (including a pure context-set change), rather than silently skipping
+        all of that bookkeeping the way a plain early return would.
         """
         bundle_primary_signal_id = str(
             bundle.metrics.get("primary_signal_id")
@@ -254,10 +297,23 @@ class StatefulIncidentMergeService:
             if job_newly_associated:
                 existing.jobs.append(job)
 
-            associations_changed = _reconcile_associations(
+            existing_context_ids = {
+                row.event_id for row in existing.events if row.is_context
+            }
+            final_event_ids = {
+                row.event_id for row in existing.events if not row.is_context
+            } | set(bundle.event_ids)
+            bounded_context_ids = _bounded_context_ids(
+                existing_context_ids,
+                bundle.context_event_ids,
+                final_event_ids,
+                max_context_events=max_context_events,
+            )
+
+            events_or_signals_changed, context_changed = _reconcile_associations(
                 existing,
                 event_ids=bundle.event_ids,
-                context_event_ids=bundle.context_event_ids,
+                context_event_ids=bounded_context_ids,
                 signal_ids=bundle.signal_ids,
             )
 
@@ -266,7 +322,8 @@ class StatefulIncidentMergeService:
             prev_generation = int(prev_metrics.get("stateful_generation", 0) or 0)
             material_change = (
                 job_newly_associated
-                or associations_changed
+                or events_or_signals_changed
+                or context_changed
                 or first_time_stateful
                 or prev_metrics.get("stateful_correlation_key") != correlation_key
                 or prev_generation != generation
@@ -365,21 +422,36 @@ class StatefulIncidentMergeService:
         )
         merged = outcome.incident
 
-        _reconcile_associations(
+        events_or_signals_changed, context_changed = _reconcile_associations(
             canonical_row,
             event_ids=merged.event_ids,
             context_event_ids=merged.context_event_ids,
             signal_ids=merged.signal_ids,
         )
 
+        material_changes = list(outcome.material_changes)
+        if context_changed:
+            # A pure context-set change (addition, bound-driven displacement,
+            # or promotion) is not captured by the pure merge function's own
+            # codes, but it is still a material projection change.
+            material_changes.append("context_changed")
         if job_newly_associated:
             canonical_row.jobs.append(job)
-
-        material_changes = list(outcome.material_changes)
-        if job_newly_associated:
-            # A new job association changes the incident's projection even when
-            # its event/signal IDs already exist.
+            # A new job association changes the incident's projection even
+            # when its event/signal IDs already exist.
             material_changes.append("job_association_added")
+
+        evidence_event_ids = tuple(item.event_id for item in merged.evidence)
+
+        if not material_changes:
+            # Nothing material happened - e.g. every incoming ID was already
+            # represented, or a candidate context ID was discarded entirely
+            # by the deterministic MAX_CONTEXT_EVENTS_PER_INCIDENT bound.
+            # _reconcile_associations made no persisted changes in that case
+            # either (events_or_signals_changed and context_changed are both
+            # False), so leave metrics/title/version untouched: this must
+            # never increment stateful_merge_count or Incident.version.
+            return canonical_row, (), evidence_event_ids
 
         # Classic (non-Mapped) Column declarations statically type instance
         # attributes as Column[T]; the same convention as
@@ -414,12 +486,11 @@ class StatefulIncidentMergeService:
             primary_signal_id=str(merged.metrics.get("primary_signal_id", "")),
         )
 
-        if material_changes:
-            # Exactly one version bump per material merge (including a pure
-            # new-job association), exposing the updated row for the outbox.
-            canonical_row.version = max(1, int(canonical_row.version or 1)) + 1  # type: ignore[assignment]
+        # Exactly one version bump per material merge (including a pure
+        # new-job association or a pure context-set change), exposing the
+        # updated row for the outbox.
+        canonical_row.version = max(1, int(canonical_row.version or 1)) + 1  # type: ignore[assignment]
 
-        evidence_event_ids = tuple(item.event_id for item in merged.evidence)
         return canonical_row, tuple(material_changes), evidence_event_ids
 
 
@@ -483,6 +554,7 @@ class StatefulIncidentCorrelationService:
                     correlation_key=correlation_key,
                     ttl=ttl,
                     now=now,
+                    detection_settings=detection_settings,
                 )
             except IntegrityError:
                 # Disambiguate by re-reading: if another worker's state row
@@ -560,6 +632,7 @@ class StatefulIncidentCorrelationService:
         correlation_key: str,
         ttl: timedelta,
         now: datetime,
+        detection_settings: DetectionSettings,
     ) -> StatefulResolveResult:
         """Create the canonical incident and its state row inside a single
         savepoint so the FK (state.incident_id -> incidents.incident_id) is
@@ -587,6 +660,7 @@ class StatefulIncidentCorrelationService:
                     strategy=profile.strategy,
                     correlation_version=profile.correlation_version,
                     generation=1,
+                    max_context_events=detection_settings.MAX_CONTEXT_EVENTS_PER_INCIDENT,
                 )
                 # Flush the incident (and its event/signal associations) first
                 # so the state row's incident_id FK is satisfiable - there is
@@ -679,6 +753,22 @@ class StatefulIncidentCorrelationService:
         )
         session.flush()
 
+        if not material_changes:
+            # _is_noop's pre-check cannot see the deterministic
+            # MAX_CONTEXT_EVENTS_PER_INCIDENT bound (e.g. a candidate context
+            # ID that gets discarded entirely once merged), so
+            # merge_into_canonical is the authoritative source of "did
+            # anything real happen." When it reports nothing, this is a true
+            # no-op: never touch the correlation-state row's version/window.
+            return self._result(
+                "no_op",
+                incoming_bundle,
+                canonical_incident=merged_row,
+                canonical_incident_id=str(merged_row.incident_id),
+                correlation_key=correlation_key,
+                generation=int(state.generation),
+            )
+
         new_first_seen = min(_as_utc(state.first_seen), incoming_bundle.first_seen)
         new_last_seen = max(_as_utc(state.last_seen), incoming_bundle.last_seen)
         ok = uow.correlation_state.extend_active_generation(
@@ -762,6 +852,7 @@ class StatefulIncidentCorrelationService:
             strategy=profile.strategy,
             correlation_version=profile.correlation_version,
             generation=new_generation,
+            max_context_events=detection_settings.MAX_CONTEXT_EVENTS_PER_INCIDENT,
         )
         session.flush()
         ok = uow.correlation_state.replace_expired_generation(

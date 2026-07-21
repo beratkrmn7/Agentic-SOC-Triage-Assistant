@@ -143,6 +143,7 @@ def test_preexisting_incident_new_job_increments_job_count_and_version_once(
             strategy="source_service_campaign",
             correlation_version="1",
             generation=1,
+            max_context_events=50,
         )
 
         assert changed is True
@@ -172,6 +173,7 @@ def test_preexisting_incident_same_job_and_metrics_is_a_true_noop(session_factor
             strategy="source_service_campaign",
             correlation_version="1",
             generation=1,
+            max_context_events=50,
         )
         assert changed_first is True
         version_after_first = int(canonical_row.version)
@@ -186,6 +188,7 @@ def test_preexisting_incident_same_job_and_metrics_is_a_true_noop(session_factor
             strategy="source_service_campaign",
             correlation_version="1",
             generation=1,
+            max_context_events=50,
         )
         assert changed_second is False
         assert int(canonical_row.version) == version_after_first
@@ -327,6 +330,7 @@ def test_richer_existing_incident_smaller_incoming_bundle_does_not_regress(
             strategy="source_service_campaign",
             correlation_version="1",
             generation=1,
+            max_context_events=50,
         )
 
         assert changed is True  # new job + first-time stateful stamping
@@ -381,6 +385,7 @@ def test_existing_incident_with_additional_event_and_signal_reconciles_and_updat
             strategy="source_service_campaign",
             correlation_version="1",
             generation=1,
+            max_context_events=50,
         )
 
         assert changed is True
@@ -414,6 +419,7 @@ def test_existing_incident_with_additional_event_and_signal_reconciles_and_updat
             strategy="source_service_campaign",
             correlation_version="1",
             generation=1,
+            max_context_events=50,
         )
 
         assert changed_again is False
