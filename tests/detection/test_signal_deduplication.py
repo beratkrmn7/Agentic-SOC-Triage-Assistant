@@ -24,10 +24,16 @@ def test_rdp_precedence():
         for i in range(2)
     ]
     res = engine.analyze(events)
-    # Both horizontal and remote service match, but RDP absorbs horizontal
-    assert len(res.signals) == 1
-    assert res.signals[0].rule_id == "rdp_probe"
-    assert res.signals[0].rule_name == "RDP Probe"
-    assert res.signals[0].signal_type == "rdp_probe"
+    # Both horizontal scan and remote service probe signals stay in
+    # DetectionResult.signals (Phase 6E.2 no longer deletes the generic
+    # scan signal); incident correlation attaches both to one incident with
+    # the more specific rdp_probe signal as its anchor/identity.
+    assert len(res.signals) == 2
+    rule_ids = {s.rule_id for s in res.signals}
+    assert rule_ids == {"rdp_probe", "network_scan_horizontal"}
+    rdp_signal = next(s for s in res.signals if s.rule_id == "rdp_probe")
+    assert rdp_signal.rule_name == "RDP Probe"
+    assert rdp_signal.signal_type == "rdp_probe"
     assert len(res.incidents) == 1
     assert res.incidents[0].incident_type == "rdp_probe"
+    assert set(res.incidents[0].signal_ids) == {s.signal_id for s in res.signals}

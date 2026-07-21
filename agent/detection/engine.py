@@ -1,14 +1,12 @@
 import time
 from datetime import datetime
-from typing import List, Optional, Any, Set
+from typing import List, Optional, Set
 import logging
 from collections import defaultdict
 
 from agent.schema import CanonicalLogEvent
-from agent.detection.context_matching import events_are_bidirectionally_related
 from agent.detection.models import (
-    DetectionSignal, IncidentBundle, DetectionResult, DetectionMetrics,
-    generate_incident_id
+    DetectionSignal, DetectionResult, DetectionMetrics,
 )
 from agent.detection.config import DetectionSettings, settings as default_settings
 from agent.detection.registry import RuleRegistry, default_registry
@@ -18,8 +16,8 @@ from agent.detection.contracts import (
     select_rule_events,
     validate_signal_contract,
 )
+from agent.detection.incident_correlation import build_correlated_incidents
 from agent.detection.suppression import SuppressionPolicy
-from agent.detection.scoring import calculate_incident_severity, calculate_incident_confidence
 
 logger = logging.getLogger(__name__)
 
@@ -163,9 +161,12 @@ class DetectionEngine:
         deduped_signals = self._deduplicate_signals(active_signals)
         metrics.duplicate_signal_count = len(active_signals) - len(deduped_signals)
 
-        # 5. Incident Correlation and Merging
-        incidents = self._correlate_incidents(deduped_signals, context_events or [], eligible_events)
+        # 5. Incident Correlation and Merging (Phase 6E.2 - Correlation V2)
+        incidents, merge_count = build_correlated_incidents(
+            deduped_signals, context_events or [], eligible_events, self.settings
+        )
         metrics.incident_count = len(incidents)
+        metrics.merge_count = merge_count
         
         # Determine uncorrelated events
         correlated_event_ids = set()
@@ -242,141 +243,13 @@ class DetectionEngine:
                         merged_list.append(current_sig)
                 
                 merged_by_rule.extend(merged_list)
-                
-            # 2. Precedence: Specific Service Probe > Generic Horizontal Scan
-            probes = [s for s in merged_by_rule if "probe" in s.rule_id.lower()]
-            scans = [s for s in merged_by_rule if s.rule_id == "network_scan_horizontal"]
-            others = [s for s in merged_by_rule if s not in probes and s not in scans]
-            
-            kept_scans = []
-            for scan in scans:
-                absorbed = False
-                scan_events = set(scan.event_ids)
-                for probe in probes:
-                    probe_events = set(probe.event_ids)
-                    if scan_events.intersection(probe_events) and abs((scan.first_seen - probe.first_seen).total_seconds()) < self.settings.INCIDENT_MERGE_WINDOW_SECONDS:
-                        absorbed = True
-                        break
-                if not absorbed:
-                    kept_scans.append(scan)
-                    
-            final_signals.extend(probes + kept_scans + others)
-            
+
+            # Cross-rule precedence (for example a specific service probe
+            # over a generic horizontal scan) is no longer resolved by
+            # deleting a signal here. Every same-rule-deduplicated signal
+            # stays in DetectionResult.signals; incident_correlation decides
+            # which cross-rule signals belong to the same incident and which
+            # one defines its identity.
+            final_signals.extend(merged_by_rule)
+
         return final_signals
-
-    def _correlate_incidents(
-        self,
-        signals: List[DetectionSignal],
-        context_events: List[CanonicalLogEvent],
-        candidate_events: List[CanonicalLogEvent],
-    ) -> List[IncidentBundle]:
-        if not signals:
-            return []
-
-        event_lookup = {e.event_id: e for e in candidate_events if e.event_id}
-        # Deterministic scan order regardless of caller-supplied context ordering.
-        sorted_context_events = sorted(
-            (ce for ce in context_events if ce.event_id),
-            key=lambda ce: (ce.timestamp.isoformat() if ce.timestamp else "", ce.event_id),
-        )
-
-        # Group by primary entity and time window
-        groups = defaultdict(list)
-        for s in signals:
-            # We use first_seen quantized to INCIDENT_MERGE_WINDOW_SECONDS for bucket grouping
-            bucket = int(s.first_seen.timestamp()) // self.settings.INCIDENT_MERGE_WINDOW_SECONDS
-            key = (s.primary_entity, s.signal_family, bucket)
-            groups[key].append(s)
-            
-        incidents = []
-        for key, sigs in groups.items():
-            entity, family, bucket = key
-            
-            all_event_ids = set()
-            all_target_entities = set()
-            all_evidence: List[Any] = []
-            all_mitre: Set[str] = set()
-            all_signal_ids = []
-            
-            first_seen = sigs[0].first_seen
-            last_seen = sigs[0].last_seen
-            
-            for s in sigs:
-                all_event_ids.update(s.event_ids)
-                all_target_entities.update(s.target_entities)
-                all_signal_ids.append(s.signal_id)
-                all_mitre.update(s.mitre_techniques)
-                # Keep up to 10 evidence items per merged incident to avoid bloat
-                if len(all_evidence) < 10:
-                    for ev in s.evidence:
-                        if len(all_evidence) < 10 and ev.event_id not in [e.event_id for e in all_evidence]:
-                            all_evidence.append(ev)
-                if s.first_seen < first_seen:
-                    first_seen = s.first_seen
-                if s.last_seen > last_seen:
-                    last_seen = s.last_seen
-                
-            sorted_event_ids = sorted(list(all_event_ids))
-            
-            # Find context events (up to MAX_CONTEXT_EVENTS_PER_INCIDENT)
-            context_ids: List[str] = []
-            seen_context_ids: Set[str] = set()
-            incident_events = [
-                event_lookup[eid] for eid in sorted_event_ids if eid in event_lookup
-            ]
-            if sorted_context_events and incident_events:
-                # Bidirectional, NAT-aware matching: forward or reverse
-                # source/destination relationship (including translated IPs),
-                # matching/reversed/translated ports or a compatible service,
-                # and close in time. A single shared IP is never sufficient.
-                start_window = first_seen.timestamp() - self.settings.INCIDENT_MERGE_WINDOW_SECONDS
-                end_window = last_seen.timestamp() + self.settings.INCIDENT_MERGE_WINDOW_SECONDS
-
-                for ce in sorted_context_events:
-                    if len(context_ids) >= self.settings.MAX_CONTEXT_EVENTS_PER_INCIDENT:
-                        break
-                    if ce.event_id in all_event_ids or ce.event_id in seen_context_ids:
-                        continue
-                    if not ce.timestamp:
-                        continue
-                    ts = ce.timestamp.timestamp()
-                    if not (start_window <= ts <= end_window):
-                        continue
-                    if any(
-                        events_are_bidirectionally_related(reference, ce)
-                        for reference in incident_events
-                    ):
-                        context_ids.append(ce.event_id)
-                        seen_context_ids.add(ce.event_id)
-            
-            incident_type = sigs[0].signal_type if len(set(s.signal_type for s in sigs)) == 1 else f"multiple_{family}"
-            merge_key = f"{family}_{bucket}"
-            
-            # Severity and confidence
-            severity = calculate_incident_severity(sigs, entity, self.settings)
-            confidence = calculate_incident_confidence(sigs)
-            
-            inc_id = generate_incident_id(family, incident_type, entity, merge_key, first_seen)
-            
-            inc = IncidentBundle(
-                incident_id=inc_id,
-                incident_type=incident_type,
-                incident_family=family,
-                title=f"Detected {incident_type} from {entity}",
-                severity=severity,
-                confidence=confidence,
-                first_seen=first_seen,
-                last_seen=last_seen,
-                primary_entity=entity,
-                target_entities=sorted(list(all_target_entities)),
-                signal_ids=sorted(list(set(all_signal_ids))),
-                event_ids=sorted_event_ids,
-                context_event_ids=context_ids,
-                evidence=all_evidence,
-                metrics={"total_events": len(all_event_ids), "distinct_targets": len(all_target_entities)},
-                mitre_techniques=sorted(list(all_mitre)),
-                merge_key=merge_key
-            )
-            incidents.append(inc)
-            
-        return sorted(incidents, key=lambda x: x.first_seen)

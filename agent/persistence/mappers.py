@@ -14,6 +14,11 @@ from agent.detection.models import IncidentBundle
 _PRIMARY_ENTITY_METRICS_KEY = "_primary_entity"
 _UNKNOWN_PRIMARY_ENTITY = "unknown"
 
+# Public key already written by agent.detection.incident_correlation into
+# IncidentBundle.metrics; read back here (not stripped - it is meant to be
+# visible) to reconstruct absorbed_signal_ids without a migration.
+_PRIMARY_SIGNAL_ID_METRICS_KEY = "primary_signal_id"
+
 
 class DataMapper:
     @staticmethod
@@ -149,6 +154,20 @@ class DataMapper:
 
     @staticmethod
     def orm_to_domain_incident(orm_inc: Incident) -> IncidentBundle:
+        signal_ids = [s.signal_id for s in orm_inc.signals]
+        metrics = dict(orm_inc.metrics or {})
+        # Phase 6E.2: no dedicated absorbed_signal_ids column (no
+        # migration). The anchor/primary signal is persisted as a scalar
+        # under this key in the existing metrics JSON column;
+        # absorbed_signal_ids is every other correlated signal.
+        primary_signal_id = metrics.get(_PRIMARY_SIGNAL_ID_METRICS_KEY)
+        if isinstance(primary_signal_id, str) and primary_signal_id in signal_ids:
+            absorbed_signal_ids = [
+                sid for sid in signal_ids if sid != primary_signal_id
+            ]
+        else:
+            absorbed_signal_ids = []
+
         return IncidentBundle( # type: ignore
             incident_id=orm_inc.incident_id,
             incident_type=orm_inc.incident_type,
@@ -160,11 +179,12 @@ class DataMapper:
             last_seen=orm_inc.last_seen,
             primary_entity=orm_inc.primary_entity,
             target_entities=orm_inc.target_entities,
-            signal_ids=[s.signal_id for s in orm_inc.signals],
+            signal_ids=signal_ids,
             event_ids=[e.event_id for e in orm_inc.events if not e.is_context],
             context_event_ids=[e.event_id for e in orm_inc.events if e.is_context],
             evidence=[], # Evidence is separate
-            metrics=orm_inc.metrics,
+            metrics=metrics,
             mitre_techniques=orm_inc.mitre_techniques,
-            merge_key=""
+            merge_key=orm_inc.merge_key or "",
+            absorbed_signal_ids=absorbed_signal_ids,
         )
