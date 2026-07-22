@@ -19,7 +19,12 @@ from agent.detection.incident_correlation import (
     signal_precedence_key,
 )
 from agent.detection.models import DetectionEvidence, DetectionSignal, IncidentBundle
-from agent.detection.scoring import calculate_incident_confidence, calculate_incident_severity
+from agent.detection.scoring import (
+    IncidentSeverityFacts,
+    calculate_incident_confidence,
+    calculate_incident_severity,
+    combine_incident_severity_facts,
+)
 
 
 _SEVERITY_RANK: dict[str, int] = {
@@ -169,6 +174,7 @@ def merge_incident_bundles(
     severity = canonical.severity
     confidence = canonical.confidence
 
+    severity_facts = None
     if anchor is not None:
         primary_signal_id = anchor.signal_id
         if (
@@ -187,7 +193,17 @@ def merge_incident_bundles(
             for signal in (available_signals or ())
             if signal.signal_id in signal_ids
         ]
-        severity = calculate_incident_severity(cluster, primary_entity, settings)
+        canonical_facts = IncidentSeverityFacts.from_metrics(canonical.metrics)
+        incoming_facts = IncidentSeverityFacts.from_metrics(incoming.metrics)
+        if canonical_facts is not None and incoming_facts is not None:
+            severity_facts = combine_incident_severity_facts(
+                canonical_facts,
+                incoming_facts,
+                family=incident_family,
+            )
+        severity = calculate_incident_severity(
+            cluster, primary_entity, settings, facts=severity_facts
+        )
         confidence = calculate_incident_confidence(cluster)
 
     absorbed_signal_ids = sorted(sid for sid in signal_ids if sid != primary_signal_id)
@@ -197,6 +213,8 @@ def merge_incident_bundles(
     metrics["correlated_signal_count"] = len(signal_ids)
     metrics["absorbed_signal_count"] = len(absorbed_signal_ids)
     metrics["primary_signal_id"] = primary_signal_id
+    if anchor is not None and severity_facts is not None:
+        metrics.update(severity_facts.as_metrics())
 
     merged = IncidentBundle(
         incident_id=canonical.incident_id,

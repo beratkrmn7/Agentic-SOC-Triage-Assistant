@@ -26,7 +26,11 @@ from agent.detection.models import (
     IncidentBundle,
     generate_incident_id,
 )
-from agent.detection.scoring import calculate_incident_confidence, calculate_incident_severity
+from agent.detection.scoring import (
+    calculate_incident_confidence,
+    calculate_incident_severity,
+    derive_incident_severity_facts,
+)
 from agent.schema import CanonicalLogEvent
 
 
@@ -411,7 +415,13 @@ def build_correlated_incident(
 
     evidence = _collect_evidence(cluster, all_event_ids)
 
-    severity = calculate_incident_severity(list(cluster), anchor.primary_entity, settings)
+    incident_events = [event_lookup[event_id] for event_id in event_ids if event_id in event_lookup]
+    severity_facts = derive_incident_severity_facts(
+        incident_events, family=anchor.signal_family
+    )
+    severity = calculate_incident_severity(
+        list(cluster), anchor.primary_entity, settings, facts=severity_facts
+    )
     confidence = calculate_incident_confidence(list(cluster))
 
     bucket = int(anchor.first_seen.timestamp()) // settings.INCIDENT_MERGE_WINDOW_SECONDS
@@ -435,6 +445,7 @@ def build_correlated_incident(
         "absorbed_signal_count": len(absorbed_signal_ids),
         "primary_signal_id": anchor.signal_id,
         "correlation_version": "2",
+        **severity_facts.as_metrics(),
     }
 
     return IncidentBundle(
@@ -522,6 +533,7 @@ def _merge_incident_pair(
     absorbed: IncidentBundle,
     signal_lookup: dict[str, DetectionSignal],
     settings: DetectionSettings,
+    event_lookup: dict[str, CanonicalLogEvent] | None = None,
 ) -> IncidentBundle:
     event_ids = sorted(set(keeper.event_ids) | set(absorbed.event_ids))
     event_id_set = set(event_ids)
@@ -566,11 +578,18 @@ def _merge_incident_pair(
             + int(absorbed.metrics.get("overlapping_incident_merge_count", 0)),
         }
     )
+    severity_facts = None
+    if event_lookup is not None:
+        severity_facts = derive_incident_severity_facts(
+            [event_lookup[event_id] for event_id in event_ids if event_id in event_lookup],
+            family=keeper.incident_family,
+        )
+        metrics.update(severity_facts.as_metrics())
 
     return keeper.model_copy(
         update={
             "severity": calculate_incident_severity(
-                signals, keeper.primary_entity, settings
+                signals, keeper.primary_entity, settings, facts=severity_facts
             ),
             "confidence": calculate_incident_confidence(signals),
             "first_seen": min(keeper.first_seen, absorbed.first_seen),
@@ -596,6 +615,7 @@ def merge_overlapping_incidents(
     incidents: Sequence[IncidentBundle],
     signals: Sequence[DetectionSignal],
     settings: DetectionSettings,
+    event_lookup: dict[str, CanonicalLogEvent] | None = None,
 ) -> tuple[list[IncidentBundle], int]:
     """Merge nested/high-overlap duplicate incidents deterministically.
 
@@ -619,7 +639,7 @@ def merge_overlapping_incidents(
 
         keeper = min(eligible, key=_incident_keeper_key)
         merged[merged.index(keeper)] = _merge_incident_pair(
-            keeper, candidate, signal_lookup, settings
+            keeper, candidate, signal_lookup, settings, event_lookup
         )
         absorbed_count += 1
 
@@ -665,6 +685,6 @@ def build_correlated_incidents(
         for cluster in clusters
     ]
     incidents, overlapping_merge_count = merge_overlapping_incidents(
-        incidents, signals, settings
+        incidents, signals, settings, event_lookup
     )
     return incidents, merge_count + overlapping_merge_count
