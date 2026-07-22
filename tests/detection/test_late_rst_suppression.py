@@ -92,3 +92,20 @@ def test_multiple_destination_ips_are_not_suppressed() -> None:
     events[-1] = events[-1].model_copy(update={"dst_ip": "193.255.130.24"})
     result = _engine().analyze(events)
     assert result.suppressed_signals == []
+
+
+def test_single_reset_event_is_not_a_late_rst_sequence() -> None:
+    registry = RuleRegistry()
+    registry.register(SPIAnomalyRule())
+    engine = DetectionEngine(
+        registry=registry,
+        settings=DetectionSettings(
+            SPI_ANOMALY_MIN_EVENTS=1,
+            SPI_ANOMALY_MIN_DISTINCT_TARGETS=1,
+        ),
+    )
+
+    result = engine.analyze(_events()[:1])
+
+    assert result.suppressed_signals == []
+    assert len(result.signals) == 1

@@ -12,6 +12,7 @@ from agent.tcp_flags import parse_tcp_flag_tokens
 
 LATE_RST_SERVICE_SOURCE_PORTS = frozenset({22, 53, 80, 443, 993, 995})
 LATE_RST_MIN_EPHEMERAL_PORT = 32_768
+LATE_RST_MIN_EVENTS = 2
 LATE_RST_SUPPRESSION_REASON = "late_rst_from_established_service"
 _RESET_FLAG_SETS = frozenset(
     {
@@ -45,7 +46,9 @@ def _is_late_rst_spi_pattern(
     if any(event is None for event in events):
         return False
     canonical_events = [event for event in events if event is not None]
-    if not canonical_events or not all(_is_explicit_spi_block(event) for event in canonical_events):
+    if len(canonical_events) < LATE_RST_MIN_EVENTS or not all(
+        _is_explicit_spi_block(event) for event in canonical_events
+    ):
         return False
 
     source_ports = {event.src_port for event in canonical_events}

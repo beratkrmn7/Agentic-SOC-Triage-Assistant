@@ -171,6 +171,7 @@ def run_job(
     suppressed: Optional[Sequence[DetectionSignal]] = None,
     uncorrelated: Optional[Sequence[str]] = None,
     stateful_correlation_enabled: Optional[bool] = None,
+    llm_enabled: bool = True,
 ) -> AnalysisResult:
     """Run one analysis job through the shared AnalysisService flow.
 
@@ -189,7 +190,7 @@ def run_job(
     )
     service = AnalysisService(
         uow=UnitOfWork(session_factory=session_factory, settings=settings),
-        llm_enabled=settings.llm_enabled,
+        llm_enabled=llm_enabled,
     )
     service.detection_engine.analyze = lambda ev, ctx: det_result  # type: ignore[assignment]
     return service._process_events(

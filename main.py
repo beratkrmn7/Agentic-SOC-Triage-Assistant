@@ -205,7 +205,9 @@ def run_mock_test():
 
         c_events = IngestionPipeline().ingest_records(raw_logs, source_name="mock_incidents").events
         
-        svc = AnalysisService()
+        from agent.config import get_settings
+
+        svc = AnalysisService(llm_enabled=get_settings().llm_enabled)
         result = svc.analyze_events(c_events, run_triage=True)
 
         for inc_state in result.incidents:

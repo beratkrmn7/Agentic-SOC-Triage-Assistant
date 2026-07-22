@@ -4,6 +4,7 @@ the per-job provider-call contract holds for every route."""
 from __future__ import annotations
 
 import agent.application.analysis_service as svc_mod
+from agent.persistence.orm_models import Incident, Report, TriageRun
 from agent.triage.routing import RoutingDecision, decide_route
 
 from tests.stateful_integration.conftest import (
@@ -57,6 +58,7 @@ def test_disabled_llm_does_not_attempt_individual_triage_provider(
         signals=[signal],
         incidents=[incident],
         run_triage=True,
+        llm_enabled=False,
     )
 
     assert fake_app.calls == 0
@@ -65,6 +67,15 @@ def test_disabled_llm_does_not_attempt_individual_triage_provider(
     assert result.incidents[0]["triage_verdict"] == "needs_review"
     assert result.incidents[0]["llm_invoked"] is False
     assert result.incidents[0]["incident_type"] == incident.incident_type
+
+    with session_factory() as session:
+        persisted_incident = session.get(Incident, "INC-A")
+        assert persisted_incident is not None
+        assert persisted_incident.status == "needs_review"
+        triage_run = session.query(TriageRun).filter_by(incident_id="INC-A").one()
+        assert triage_run.status == "failed"
+        assert triage_run.review_reason == "provider_unavailable"
+        assert session.query(Report).filter_by(incident_id="INC-A").count() == 0
 
 
 def test_deterministic_report_route_makes_zero_provider_calls(

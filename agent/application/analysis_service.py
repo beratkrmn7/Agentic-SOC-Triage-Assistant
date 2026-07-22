@@ -328,6 +328,11 @@ class AnalysisService:
         # migration); stash it in the existing token_usage JSON column,
         # which is otherwise unused here.
         token_usage = {"policy_adjustments": inc_state.get("policy_adjustments", [])}
+        provider_unavailable = bool(
+            route == "individual_triage"
+            and not llm_invoked
+            and inc_state.get("review_reason") == "provider_unavailable"
+        )
         if llm_invoked:
             new_status = "triaged" if verdict else "needs_review"
             run = TriageRun(
@@ -340,6 +345,22 @@ class AnalysisService:
                 incident_type=inc_state.get("incident_type"),
                 iteration_count=inc_state.get("iteration_count", 0),
                 status="completed" if verdict else "failed",
+                token_usage=token_usage,
+            )
+        elif provider_unavailable:
+            new_status = "needs_review"
+            verdict = verdict or "needs_review"
+            run = TriageRun(
+                triage_run_id=str(uuid.uuid4()),
+                job_id=job.id,
+                incident_id=incident_id,
+                verdict=verdict,
+                severity=inc_state.get("severity"),
+                confidence_score=inc_state.get("confidence_score"),
+                incident_type=inc_state.get("incident_type"),
+                review_reason="provider_unavailable",
+                iteration_count=0,
+                status="failed",
                 token_usage=token_usage,
             )
         else:
@@ -367,7 +388,13 @@ class AnalysisService:
             IncidentLifecycle.transition(
                 triage_incident,
                 new_status,
-                actor_type="triage_agent" if llm_invoked else "deterministic_triage",
+                actor_type=(
+                    "triage_agent"
+                    if llm_invoked
+                    else "triage_system"
+                    if provider_unavailable
+                    else "deterministic_triage"
+                ),
                 actor_id="system",
                 details={"verdict": verdict, "route": route},
             )
@@ -924,6 +951,13 @@ class AnalysisService:
                 initial_state["incident_type"] = bundle.incident_type
                 initial_state["severity"] = "none"
                 initial_state["confidence_score"] = 0.0
+                self._persist_triage_outputs(
+                    uow,
+                    job,
+                    initial_state,
+                    row,
+                    allow_lifecycle_transition=allow_transition,
+                )
                 return initial_state
             routing_metrics["provider_invocation_count"] += 1
             try:

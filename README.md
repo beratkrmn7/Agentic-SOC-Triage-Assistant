@@ -162,7 +162,7 @@ detection, persistence, routing, incident identity, or API output.
   asset business criticality or successful compromise.
 - Nested or strongly overlapping incidents with the same identity are merged
   deterministically. Evidence remains bounded and belongs to the final event set.
-- A structural late-RST SPI pattern is suppressed only when its canonical event facts
+- A structural late-RST SPI sequence of at least two events is suppressed only when its canonical event facts
   satisfy the exact service-source, ephemeral-destination, reset-flag, destination, and
   action constraints. Suppression is visible in the brief.
 - Blocked reconnaissance is grouped only when every contributing incident is blocked and

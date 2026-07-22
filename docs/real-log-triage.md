@@ -81,7 +81,8 @@ visible without mutating the canonical event.
 ## Structural late-RST suppression
 
 Suppression receives an immutable event lookup during detection. An SPI anomaly is
-classified as `late_rst_from_established_service` only when every contributing event:
+classified as `late_rst_from_established_service` only when it contains at least two
+contributing events and every event:
 
 - is an explicit SPI block;
 - shares one well-known source port from `22, 53, 80, 443, 993, 995`;
