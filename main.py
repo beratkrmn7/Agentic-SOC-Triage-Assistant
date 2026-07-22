@@ -97,7 +97,12 @@ def _run_persistent_analysis(file_path: str, *, run_triage: bool, analysis_mode:
     )
 
 
-def analyze_file(file_path: str, *, isolated: bool = False):
+def analyze_file(
+    file_path: str,
+    *,
+    isolated: bool = False,
+    report_mode: str = "brief",
+):
     console.print(f"[bold blue]Starting File Analysis: {file_path}[/bold blue]")
 
     result = _run_persistent_analysis(
@@ -108,12 +113,44 @@ def analyze_file(file_path: str, *, isolated: bool = False):
         isolated=isolated,
     )
 
-    _print_analysis_summary(result)
+    if report_mode == "full":
+        _print_analysis_summary(result)
+        for inc_state in result.incidents:
+            _print_incident_state(inc_state)
+        _print_routing_summary(result)
+        return result
 
-    for inc_state in result.incidents:
-        _print_incident_state(inc_state)
+    from pathlib import Path
 
-    _print_routing_summary(result)
+    from agent.detection.rollup import build_rollup
+    from agent.triage.brief import render_soc_brief
+
+    detection_result = result.detection_result
+    if detection_result is None:
+        _print_analysis_summary(result)
+        return result
+    run_event_ids = (
+        [event.event_id for event in result.ingestion_result.events]
+        if result.ingestion_result and result.ingestion_result.events
+        else list(result.event_map)
+    )
+    rollup = build_rollup(
+        detection_result.incidents,
+        result.event_map,
+        suppressed_signals=detection_result.suppressed_signals,
+        run_event_ids=run_event_ids,
+    )
+    render_soc_brief(
+        console,
+        rollup=rollup,
+        event_lookup=result.event_map,
+        source_name=Path(file_path).name,
+        job_id=result.job_id,
+        provider_call_count=int(
+            (result.routing_metrics or {}).get("provider_invocation_count", 0)
+        ),
+    )
+    return result
 
 def _print_analysis_summary(result) -> None:
     console.print("\n[bold cyan]--- ANALYSIS SUMMARY ---[/bold cyan]")
@@ -123,6 +160,12 @@ def _print_analysis_summary(result) -> None:
     det_result = result.detection_result
     if det_result is not None:
         console.print(f"Detected signals: {det_result.metrics.signal_count}")
+        console.print(
+            f"Suppressed signals: {det_result.metrics.suppressed_signal_count}"
+        )
+        console.print(
+            f"Duplicate signals removed: {det_result.metrics.duplicate_signal_count}"
+        )
         # With stateful correlation enabled this is the final canonical count.
         console.print(f"Final incidents: {det_result.metrics.incident_count}")
     metrics = result.routing_metrics or {}
@@ -247,6 +290,12 @@ if __name__ == "__main__":
     parser.add_argument("--ingest-file", type=str, help="Path to file to only run ingestion and print summary")
     parser.add_argument("--detect-file", type=str, help="Path to file to only run deterministic detection and print summary")
     parser.add_argument(
+        "--report",
+        choices=("full", "brief"),
+        default="brief",
+        help="Analyze output format (default: brief)",
+    )
+    parser.add_argument(
         "--isolated",
         action="store_true",
         help="Disable cross-job correlation for this analysis",
@@ -258,6 +307,10 @@ if __name__ == "__main__":
     elif args.ingest_file:
         ingest_file_only(args.ingest_file)
     elif args.file:
-        analyze_file(args.file, isolated=args.isolated)
+        analyze_file(
+            args.file,
+            isolated=args.isolated,
+            report_mode=args.report,
+        )
     else:
         run_mock_test()
