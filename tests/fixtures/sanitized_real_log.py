@@ -13,8 +13,9 @@ relative timing that drives windowing and grouping.
 Two capture files are represented:
 
 ``file 0`` - an SSH sweep in progress, a 56-packet Docker daemon exposure, a
-one-packet Redis exposure, and two fixed-source-port scanners that each meet
-the canonical exact-source threshold on their own.
+one-packet Redis exposure, one fixed-source-port scanner that meets the
+canonical exact-source threshold on its own, and one that reaches the same
+event and port counts but has no TCP flags recorded.
 
 ``file 1`` - the remainder of the SSH sweep (four single-packet port-22
 records plus two port-22022 records), a 122-packet Redis exposure, two
@@ -42,8 +43,8 @@ REDIS_EXPOSURE_SOURCE_FILE1 = "192.0.2.29"
 
 # Sanitized fixed-source-port scanners, all inside one documentation /24.
 FSP_NET = "203.0.113"
-FSP_SOURCE_CANONICAL_A = f"{FSP_NET}.101"  # 7 events, meets exact-source rule
-FSP_SOURCE_CANONICAL_B = f"{FSP_NET}.103"  # 5 events, meets exact-source rule
+FSP_SOURCE_CANONICAL_A = f"{FSP_NET}.101"  # 7 SYN events, meets exact-source rule
+FSP_SOURCE_NO_FLAGS = f"{FSP_NET}.103"  # 5 events, but no TCP flags recorded
 FSP_SOURCE_CLUSTER_A = f"{FSP_NET}.102"  # 3 events, sub-threshold alone
 FSP_SOURCE_CLUSTER_B = f"{FSP_NET}.111"  # 4 events, sub-threshold alone
 FSP_SOURCE_BLOCKED = f"{FSP_NET}.112"  # 4 blocked events, disjoint window
@@ -333,10 +334,12 @@ FSP_CANONICAL_A = _fixed_source_port_events(
     packets=2,
 )
 
-#: 5 allowed events, 5 distinct destination ports. Also canonical.
-FSP_CANONICAL_B = _fixed_source_port_events(
+#: 5 allowed events across 5 destination ports, but the capture recorded no
+#: TCP flags for them. Without an observed SYN this is not a confirmed initial
+#: connection probe, so it must not be reported as a fixed-source-port scan.
+FSP_NO_FLAGS = _fixed_source_port_events(
     "f0-fsp-b",
-    FSP_SOURCE_CANONICAL_B,
+    FSP_SOURCE_NO_FLAGS,
     ("198.51.100.83",),
     (22, 25, 80, 179, 3389),
     action="pass",
@@ -387,7 +390,7 @@ FILE0_EVENTS = (
     DOCKER_EXPOSURE,
     REDIS_EXPOSURE_SINGLE_SYN,
     *FSP_CANONICAL_A,
-    *FSP_CANONICAL_B,
+    *FSP_NO_FLAGS,
 )
 
 FILE1_EVENTS = (
