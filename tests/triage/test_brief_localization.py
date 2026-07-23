@@ -205,3 +205,312 @@ def test_both_languages_reuse_one_artifact_and_call_no_provider() -> None:
     # Each language shows only its own text.
     assert _squashed("The Docker daemon API") not in _squashed(turkish)
     assert _squashed("Docker daemon API'si") not in _squashed(english)
+
+
+# --- Language-aware titles and ATT&CK rendering --------------------------
+
+#: Presentation text that must never appear in a Turkish brief.
+ENGLISH_PRESENTATION_TEXT = (
+    "ATT&CK context",
+    "Network Service Discovery",
+    "External Remote Services",
+    "context only",
+    "Externally allowed",
+    "Fixed source port",
+    "insufficient behavioral evidence",
+)
+
+#: Deterministic identifiers that must survive in every language.
+PRESERVED_IDENTIFIERS = ("T1046", "TA0007")
+
+
+@pytest.mark.parametrize("phrase", ENGLISH_PRESENTATION_TEXT)
+def test_turkish_brief_contains_no_english_presentation_text(phrase: str) -> None:
+    assert phrase not in _render("tr")
+
+
+def test_turkish_brief_preserves_attack_identifiers() -> None:
+    output = _render("tr")
+    for identifier in PRESERVED_IDENTIFIERS:
+        assert identifier in output
+    assert "ATT&CK bağlamı" in output
+
+
+def test_turkish_brief_does_not_show_the_canonical_english_title() -> None:
+    events = [DOCKER_EXPOSURE, *SSH_SWEEP_PORT_22]
+    incident = _incident(events)
+    lookup = {e.event_id: e for e in events}
+    selection = build_brief_selection([incident], lookup)
+
+    # The canonical English title is still the stored identity...
+    assert any("Externally allowed" in item.title for item in selection.all_items)
+    # ...but it is not what the Turkish brief renders.
+    assert "Externally allowed" not in _render("tr")
+
+
+def test_display_titles_are_language_aware_for_every_row_kind() -> None:
+    from agent.detection.fixed_source_port_cluster import FixedSourcePortCluster
+    from agent.detection.presentation import (
+        item_from_exposure_group,
+        item_from_scan_cluster,
+    )
+    from agent.triage.localization import render_item_title
+    from datetime import datetime, timedelta, timezone
+
+    events = [DOCKER_EXPOSURE]
+    incident = _incident(events)
+    lookup = {e.event_id: e for e in events}
+    selection = build_brief_selection([incident], lookup)
+    incident_item = selection.all_items[0]
+
+    from agent.detection.presentation import build_exposure_groups
+
+    group = build_exposure_groups([incident], lookup)[0]
+    group_item = item_from_exposure_group(group)
+
+    now = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    cluster_item = item_from_scan_cluster(
+        FixedSourcePortCluster(
+            cluster_id="fsp:203.0.113.0/24:443",
+            source_cidr="203.0.113.0/24",
+            contributing_source_ips=("203.0.113.102", "203.0.113.111"),
+            fixed_source_port=443,
+            event_count=7,
+            allowed_event_count=7,
+            blocked_event_count=0,
+            distinct_destination_ip_count=2,
+            distinct_destination_port_count=6,
+            destination_ports=(22, 80, 179, 443, 3306, 3389),
+            sensitive_destination_ports=(22, 3306, 3389),
+            event_ids=("e1",),
+            first_seen=now,
+            last_seen=now + timedelta(seconds=1),
+            severity="high",
+        )
+    )
+
+    for item in (incident_item, group_item, cluster_item):
+        english = render_item_title(item, "en")
+        turkish = render_item_title(item, "tr")
+        assert english and turkish
+        assert english != turkish, item.kind
+
+    # Deterministic values survive inside the localized titles.
+    assert "443" in render_item_title(cluster_item, "tr")
+    assert "docker" in render_item_title(group_item, "tr")
+
+
+def test_attack_context_ids_are_never_translated() -> None:
+    from agent.triage.attack_context import (
+        AttackContext,
+        UNSUPPORTED,
+        render_attack_context,
+    )
+
+    discovery = AttackContext("T1046", "TA0007", "behavioral")
+    remote = AttackContext("T1133", "TA0001", "context")
+
+    for context in (discovery, remote):
+        for lang in ("en", "tr"):
+            rendered = render_attack_context(context, lang)
+            assert context.technique in rendered
+            assert context.tactic in rendered
+
+    assert "Network Service Discovery" in render_attack_context(discovery, "en")
+    assert "Network Service Discovery" not in render_attack_context(discovery, "tr")
+    assert "External Remote Services" not in render_attack_context(remote, "tr")
+    assert "context only" not in render_attack_context(remote, "tr")
+
+    assert "insufficient behavioral evidence" in render_attack_context(
+        UNSUPPORTED, "en"
+    )
+    assert "insufficient behavioral evidence" not in render_attack_context(
+        UNSUPPORTED, "tr"
+    )
+
+
+def test_english_brief_output_is_unchanged_by_localization() -> None:
+    """The English brief still uses its original wording."""
+    output = _render("en")
+    for phrase in (
+        "SOC TRIAGE BRIEF",
+        "ANALYST SUMMARY",
+        "§1 ACT NOW",
+        "§5 EXPOSED ASSET INVENTORY",
+        "Provider calls for this request",
+        "ATT&CK context",
+    ):
+        assert phrase in output
+
+
+# --- Full mode ------------------------------------------------------------
+
+#: Analysis-summary labels that must not appear in Turkish full mode.
+ENGLISH_SUMMARY_LABELS = (
+    "--- ANALYSIS SUMMARY ---",
+    "Parsed/valid events",
+    "Detected signals",
+    "Suppressed signals",
+    "Duplicate signals removed",
+    "Final incidents",
+    "Reports:",
+    "Starting File Analysis",
+    "--- TRIAGE ROUTING SUMMARY ---",
+)
+
+#: Deterministic-report headings that must not be printed untranslated.
+ENGLISH_REPORT_HEADINGS = (
+    "Deterministic Report",
+    "Observed activity",
+    "Distinct targets",
+    "were blocked by the firewall",
+)
+
+
+class _Metrics:
+    parsed_records = 10
+    signal_count = 3
+    suppressed_signal_count = 1
+    duplicate_signal_count = 2
+    incident_count = 1
+
+
+class _Ingestion:
+    metrics = _Metrics()
+
+
+class _Detection:
+    metrics = _Metrics()
+
+    def __init__(self, incidents=()):
+        self.incidents = list(incidents)
+
+
+class _Result:
+    def __init__(self, incidents=(), event_map=None, states=()):
+        self.ingestion_result = _Ingestion()
+        self.detection_result = _Detection(incidents)
+        self.event_map = event_map or {}
+        self.incidents = list(states)
+        self.routing_metrics = {
+            "individual_triage_count": 1,
+            "deterministic_report_count": 0,
+            "digest_incident_count": 0,
+            "store_only_count": 0,
+            "provider_invocation_count": 1,
+        }
+        self.triage_digests = []
+        self.brief_selection = None
+        self.brief_enrichment = None
+
+
+def test_turkish_full_mode_uses_no_english_summary_labels(capsys) -> None:
+    result = _Result()
+    main._print_analysis_summary(result, "tr")
+    main._print_routing_summary(result, "tr")
+    output = capsys.readouterr().out
+
+    for label in ENGLISH_SUMMARY_LABELS:
+        assert label not in output, label
+    turkish = main.FULL_MODE_LABELS["tr"]
+    for key in (
+        "analysis_summary",
+        "parsed_events",
+        "detected_signals",
+        "suppressed_signals",
+        "duplicate_signals",
+        "final_incidents",
+        "reports",
+        "routing_summary",
+        "batch_eligible",
+    ):
+        assert turkish[key] in output, key
+
+
+def test_english_full_mode_summary_is_unchanged(capsys) -> None:
+    result = _Result()
+    main._print_analysis_summary(result, "en")
+    main._print_routing_summary(result, "en")
+    output = capsys.readouterr().out
+    for label in (
+        "--- ANALYSIS SUMMARY ---",
+        "Parsed/valid events",
+        "Detected signals",
+        "Final incidents",
+        "Reports:",
+    ):
+        assert label in output, label
+
+
+def test_turkish_full_mode_does_not_print_the_english_report_body(capsys) -> None:
+    from agent.triage.routing import generate_deterministic_report
+
+    events = [DOCKER_EXPOSURE]
+    incident = _incident(events, incident_id="INC-REPORT")
+    lookup = {e.event_id: e for e in events}
+    stored = generate_deterministic_report(incident, events)
+    # The persisted body is English, as written at analysis time.
+    assert "Deterministic Report" in stored
+
+    state = {
+        "incident_id": "INC-REPORT",
+        "triage_route": "individual_triage",
+        "triage_verdict": "suspicious_activity",
+        "incident_type": "critical_management_service_exposed",
+        "severity": "high",
+        "iteration_count": 0,
+        "final_report": stored,
+    }
+    result = _Result(incidents=[incident], event_map=lookup, states=[state])
+
+    main._print_incident_state(state, result, lang="tr")
+    output = capsys.readouterr().out
+
+    for heading in ENGLISH_REPORT_HEADINGS:
+        assert heading not in output, heading
+    assert "Deterministik Rapor" in output
+    # Deterministic facts still appear untranslated.
+    assert DOCKER_EXPOSURE.dst_ip in output
+    assert "2375" in output
+
+    # The stored report itself was not rewritten.
+    assert state["final_report"] == stored
+
+
+def test_english_full_mode_still_prints_the_persisted_report(capsys) -> None:
+    from agent.triage.routing import generate_deterministic_report
+
+    events = [DOCKER_EXPOSURE]
+    incident = _incident(events, incident_id="INC-REPORT")
+    lookup = {e.event_id: e for e in events}
+    stored = generate_deterministic_report(incident, events)
+    state = {
+        "incident_id": "INC-REPORT",
+        "triage_route": "individual_triage",
+        "triage_verdict": "suspicious_activity",
+        "incident_type": "critical_management_service_exposed",
+        "severity": "high",
+        "iteration_count": 0,
+        "final_report": stored,
+    }
+    result = _Result(incidents=[incident], event_map=lookup, states=[state])
+
+    main._print_incident_state(state, result, lang="en")
+    output = capsys.readouterr().out
+    assert "Deterministic Report" in output
+    assert "Deterministik Rapor" not in output
+
+
+def test_localized_report_render_is_provider_free(monkeypatch) -> None:
+    from agent.triage.localization import render_deterministic_report
+
+    def provider_forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("provider call attempted while rendering")
+
+    monkeypatch.setattr(
+        "agent.triage.provider_factory.build_provider", provider_forbidden
+    )
+    events = [DOCKER_EXPOSURE]
+    incident = _incident(events, incident_id="INC-REPORT")
+    for lang in ("en", "tr"):
+        assert render_deterministic_report(incident, events, lang)

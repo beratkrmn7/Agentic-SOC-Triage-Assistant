@@ -121,6 +121,9 @@ class BriefActionItem(BaseModel):
     mitre_technique: Optional[str] = None
     mitre_tactic: Optional[str] = None
     attack_context: str = ""
+    #: Set only for fixed-source-port clusters, so a display title can name the
+    #: pinned source port without re-deriving it from destination ports.
+    fixed_source_port: Optional[int] = None
 
     @property
     def member_incident_count(self) -> int:
@@ -383,6 +386,7 @@ def item_from_scan_cluster(cluster: FixedSourcePortCluster) -> BriefActionItem:
         verdict="suspicious_activity",
         mitre_technique=cluster.mitre_technique,
         mitre_tactic=cluster.mitre_tactic,
+        fixed_source_port=cluster.fixed_source_port,
     )
 
 

@@ -74,83 +74,6 @@ _FORBIDDEN_CLAIM_PATTERNS = (
     re.compile(r"(?i)\broot access\b"),
 )
 
-#: Negations that make a forbidden term a *denial* rather than an assertion.
-#: The prompt tells the model not to use these words at all, so this only
-#: keeps an otherwise-safe sentence from being thrown away. It never permits
-#: an affirmative claim: the negation must appear immediately before the term.
-_NEGATION_CUES = (
-    "no",
-    "not",
-    "never",
-    "nothing",
-    "without",
-    "cannot",
-    "can't",
-    "does",  # "does not prove", after "not" is stripped as its own token
-    "doesn't",
-    "did",
-    "didn't",
-    "is",
-    "was",
-    "were",
-    "are",
-    "isn't",
-    "wasn't",
-    "aren't",
-    "weren't",
-    "prove",
-    "proves",
-    "proven",
-    "proof",
-    "imply",
-    "implies",
-    "indicate",
-    "indicates",
-    "evidence",
-    "unproven",
-    "unconfirmed",
-)
-
-#: How many preceding words may carry the negation, e.g.
-#: "does not prove compromise" -> 3 words before "compromise".
-_NEGATION_WINDOW_WORDS = 5
-
-_WORD = re.compile(r"[a-zA-Z']+")
-
-
-def _is_negated(text: str, start: int) -> bool:
-    """True when the match at ``start`` sits inside an explicit denial.
-
-    Requires an actual negator ("no", "not", "never", "without", ...) in the
-    few preceding words. A sentence that merely mentions "evidence" nearby is
-    not enough on its own.
-    """
-    preceding = _WORD.findall(text[:start].lower())[-_NEGATION_WINDOW_WORDS:]
-    if not preceding:
-        return False
-    hard_negators = {
-        "no",
-        "not",
-        "never",
-        "nothing",
-        "without",
-        "cannot",
-        "can't",
-        "doesn't",
-        "didn't",
-        "isn't",
-        "wasn't",
-        "aren't",
-        "weren't",
-        "unproven",
-        "unconfirmed",
-    }
-    if not any(word in hard_negators for word in preceding):
-        return False
-    # The denial must be about proof/observation, not a bare "no compromise
-    # was needed" style aside.
-    return any(word in _NEGATION_CUES for word in preceding)
-
 
 class BriefEnrichmentFacts(BaseModel):
     """The bounded structured view of one row that the provider receives."""
@@ -293,11 +216,12 @@ def _rejection_reason(text: str, item: BriefActionItem) -> Optional[str]:
     if _URL.search(text):
         return "url"
     for pattern in _FORBIDDEN_CLAIM_PATTERNS:
-        for match in pattern.finditer(text):
-            # An explicit denial ("does not prove compromise") is safe; an
-            # affirmative use of the same word is not.
-            if not _is_negated(text, match.start()):
-                return "unsupported_claim"
+        if pattern.search(text):
+            # No negation exception. A nearby "not" is not reliable evidence
+            # that the forbidden term is being denied - "not merely scanned
+            # but compromised" is an affirmative claim - and the prompt already
+            # tells the model never to use this vocabulary at all.
+            return "unsupported_claim"
 
     known_addresses = _known_addresses(item)
     for address in _IPV4.findall(text):

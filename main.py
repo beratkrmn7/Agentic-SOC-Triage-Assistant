@@ -44,6 +44,13 @@ FULL_MODE_LABELS = {
         "store_only": "(Stored only; no report generated)",
         "no_report": "(No report generated)",
         "analysis_summary": "--- ANALYSIS SUMMARY ---",
+        "starting_analysis": "Starting File Analysis",
+        "parsed_events": "Parsed/valid events",
+        "detected_signals": "Detected signals",
+        "suppressed_signals": "Suppressed signals",
+        "duplicate_signals": "Duplicate signals removed",
+        "final_incidents": "Final incidents",
+        "reports": "Reports",
     },
     "tr": {
         "routing_summary": "--- TRİYAJ YÖNLENDİRME ÖZETİ ---",
@@ -73,6 +80,13 @@ FULL_MODE_LABELS = {
         "store_only": "(Yalnızca saklandı; rapor oluşturulmadı)",
         "no_report": "(Rapor oluşturulmadı)",
         "analysis_summary": "--- ANALİZ ÖZETİ ---",
+        "starting_analysis": "Dosya Analizi Başlatılıyor",
+        "parsed_events": "Ayrıştırılan/geçerli olaylar",
+        "detected_signals": "Tespit edilen sinyaller",
+        "suppressed_signals": "Bastırılan sinyaller",
+        "duplicate_signals": "Kaldırılan yinelenen sinyaller",
+        "final_incidents": "Nihai olaylar",
+        "reports": "Raporlar",
     },
 }
 
@@ -138,6 +152,41 @@ def _matching_enrichment(result, incident_id: str, lang: str):
     return None
 
 
+def _report_body_for_display(inc_state, result, lang: str):
+    """The report body to show, rendered in the requested language.
+
+    English shows the persisted report verbatim. Turkish re-renders the same
+    deterministic facts through the localized presentation renderer, so the
+    stored English report is never displayed untranslated and is never
+    rewritten. Language stays presentation-only: no provider call, no change
+    to canonical analysis, incident identity, idempotency or any persisted
+    security decision.
+    """
+    stored = inc_state.get('final_report')
+    if lang != "tr":
+        return stored
+    if not stored or result is None:
+        return stored
+
+    from agent.triage.localization import (
+        find_incident,
+        incident_events,
+        render_deterministic_report,
+    )
+
+    detection_result = getattr(result, "detection_result", None)
+    if detection_result is None:
+        return stored
+    incident = find_incident(
+        detection_result.incidents, str(inc_state.get('incident_id', ''))
+    )
+    if incident is None:
+        return stored
+    return render_deterministic_report(
+        incident, incident_events(incident, result.event_map), "tr"
+    )
+
+
 def _print_incident_state(
     inc_state: IncidentState, result=None, *, lang: str = "en"
 ) -> None:
@@ -178,11 +227,12 @@ def _print_incident_state(
         for action in actions:
             console.print(f"  - {action}")
 
-    if inc_state.get('final_report'):
+    report_body = _report_body_for_display(inc_state, result, lang)
+    if report_body:
         console.print("\n")
         console.print(
             Panel(
-                Markdown(inc_state['final_report']),
+                Markdown(report_body),
                 title=f"[bold green]{labels['generated_report']}[/bold green]",
                 border_style="green",
             )
@@ -240,7 +290,8 @@ def analyze_file(
     report_mode: str = "brief",
     lang: str = "en",
 ):
-    console.print(f"[bold blue]Starting File Analysis: {file_path}[/bold blue]")
+    banner = FULL_MODE_LABELS.get(lang, FULL_MODE_LABELS["en"])["starting_analysis"]
+    console.print(f"[bold blue]{banner}: {file_path}[/bold blue]")
 
     result = _run_persistent_analysis(
         file_path,
@@ -299,22 +350,30 @@ def _print_analysis_summary(result, lang: str = "en") -> None:
     console.print(f"\n[bold cyan]{labels['analysis_summary']}[/bold cyan]")
     ingestion = getattr(result, "ingestion_result", None)
     if ingestion is not None:
-        console.print(f"Parsed/valid events: {ingestion.metrics.parsed_records}")
+        console.print(
+            f"{labels['parsed_events']}: {ingestion.metrics.parsed_records}"
+        )
     det_result = result.detection_result
     if det_result is not None:
-        console.print(f"Detected signals: {det_result.metrics.signal_count}")
         console.print(
-            f"Suppressed signals: {det_result.metrics.suppressed_signal_count}"
+            f"{labels['detected_signals']}: {det_result.metrics.signal_count}"
         )
         console.print(
-            f"Duplicate signals removed: {det_result.metrics.duplicate_signal_count}"
+            f"{labels['suppressed_signals']}: "
+            f"{det_result.metrics.suppressed_signal_count}"
+        )
+        console.print(
+            f"{labels['duplicate_signals']}: "
+            f"{det_result.metrics.duplicate_signal_count}"
         )
         # With stateful correlation enabled this is the final canonical count.
-        console.print(f"Final incidents: {det_result.metrics.incident_count}")
+        console.print(
+            f"{labels['final_incidents']}: {det_result.metrics.incident_count}"
+        )
     report_count = sum(
         1 for incident_state in result.incidents if incident_state.get("final_report")
     )
-    console.print(f"Reports: {report_count}")
+    console.print(f"{labels['reports']}: {report_count}")
 
 def run_mock_test():
     run_all = os.environ.get("RUN_ALL", "false").lower() == "true"

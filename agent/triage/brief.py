@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Literal
 
 from rich.console import Console
 from rich.panel import Panel
@@ -24,6 +23,7 @@ from agent.triage.disposition import (
     classify_evidence_strength,
 )
 from agent.triage.enrichment import BriefEnrichmentResult
+from agent.triage.localization import Language, render_item_title
 
 
 MAX_BRIEF_EVIDENCE_IDS = 3
@@ -137,7 +137,6 @@ _WEAK_STRENGTHS = frozenset(
     {EvidenceStrength.SYN_ONLY, EvidenceStrength.SINGLE_PACKET_NON_SYN}
 )
 
-Language = Literal["en", "tr"]
 
 # Static UI strings only. Deterministic facts - IDs, addresses, ports,
 # severity enum values, evidence-strength values and ATT&CK identifiers - are
@@ -341,7 +340,7 @@ def _item_flow(item: BriefActionItem, labels: dict[str, str]) -> str:
     )
 
 
-def _item_attack_context(item: BriefActionItem) -> str:
+def _item_attack_context(item: BriefActionItem, lang: Language) -> str:
     context = derive_attack_context(
         incident_family=item.incident_family,
         service=item.service,
@@ -349,7 +348,7 @@ def _item_attack_context(item: BriefActionItem) -> str:
         distinct_port_count=len(item.ports),
         distinct_destination_count=item.destination_count,
     )
-    return render_attack_context(context)
+    return render_attack_context(context, lang)
 
 
 def _shared_actions(
@@ -426,11 +425,13 @@ def _action_table(
             ", ".join(item.evidence_ids[:MAX_BRIEF_EVIDENCE_IDS]) or labels["none"]
         )
         why_lines = [explanation] if explanation else []
-        why_lines.append(_item_attack_context(item))
+        why_lines.append(_item_attack_context(item, lang))
         why_lines.extend(f"- {action}" for action in actions)
         why_lines.append(f"{labels['evidence']}: {evidence_text}")
 
-        what_lines = [item.title, _item_flow(item, labels)]
+        # The canonical English title is the stored identity; the row shows a
+        # deterministic language-aware display title instead.
+        what_lines = [render_item_title(item, lang), _item_flow(item, labels)]
         what_lines.append(f"{labels['strength']}: {strength_text}")
         if item.member_incident_count > 1:
             what_lines.append(

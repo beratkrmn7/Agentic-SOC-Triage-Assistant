@@ -49,14 +49,16 @@ _WEAK_STRENGTHS = frozenset(
 class AttackContext(NamedTuple):
     technique: Optional[str]
     tactic: Optional[str]
-    label: str
+    #: How the technique applies: "behavioral" when the behaviour was actually
+    #: observed, "context" when the mapping only describes the exposed service.
+    kind: str = "unsupported"
 
     @property
     def supported(self) -> bool:
         return self.technique is not None
 
 
-UNSUPPORTED = AttackContext(None, None, INSUFFICIENT_EVIDENCE_TEXT)
+UNSUPPORTED = AttackContext(None, None, "unsupported")
 
 
 def derive_attack_context(
@@ -76,20 +78,13 @@ def derive_attack_context(
         distinct_port_count >= 3 or distinct_destination_count >= 3
     )
     if enumerating:
-        return AttackContext(
-            DISCOVERY_TECHNIQUE,
-            DISCOVERY_TACTIC,
-            f"{DISCOVERY_TECHNIQUE} Network Service Discovery ({DISCOVERY_TACTIC})",
-        )
+        return AttackContext(DISCOVERY_TECHNIQUE, DISCOVERY_TACTIC, "behavioral")
 
     if service in REMOTE_ACCESS_SERVICES:
         # External use of a real remote-access service is what T1133 covers.
         # It is shown as context, not as a proven executed technique.
         return AttackContext(
-            EXTERNAL_REMOTE_SERVICES_TECHNIQUE,
-            INITIAL_ACCESS_TACTIC,
-            f"{EXTERNAL_REMOTE_SERVICES_TECHNIQUE} External Remote Services "
-            f"({INITIAL_ACCESS_TACTIC}) - context only",
+            EXTERNAL_REMOTE_SERVICES_TECHNIQUE, INITIAL_ACCESS_TACTIC, "context"
         )
 
     # A permitted database/management SYN proves an open port, not behaviour.
@@ -98,6 +93,24 @@ def derive_attack_context(
     return UNSUPPORTED
 
 
-def render_attack_context(context: AttackContext) -> str:
-    """The single rendering used by every brief row."""
-    return f"ATT&CK context: {context.label}"
+def render_attack_context(context: AttackContext, lang: str = "en") -> str:
+    """The single rendering used by every brief row.
+
+    Technique and tactic IDs are printed verbatim in every language; only the
+    surrounding words are localized.
+    """
+    from agent.triage.localization import ATTACK_LABELS
+
+    labels = ATTACK_LABELS.get(lang, ATTACK_LABELS["en"])
+    if context.technique is None:
+        return f"{labels['prefix']}: {labels['insufficient']}"
+
+    name = labels.get(context.technique, "")
+    body = f"{context.technique}"
+    if name:
+        body += f" {name}"
+    if context.tactic:
+        body += f" ({context.tactic})"
+    if context.kind == "context":
+        body += f" - {labels['context_only']}"
+    return f"{labels['prefix']}: {body}"

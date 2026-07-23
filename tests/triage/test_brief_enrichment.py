@@ -432,7 +432,8 @@ def test_normal_safe_response_is_accepted_not_forced_to_fallback() -> None:
                         "The container management API grants administrative "
                         "control over the host that runs it, so reachability "
                         "from outside the perimeter is significant on its own. "
-                        "The observed evidence does not prove compromise."
+                        "The records show a permitted connection attempt and "
+                        "nothing further about what followed."
                     ),
                     "explanation_tr": (
                         "Konteyner yönetim API'si, üzerinde çalıştığı sunucu "
@@ -467,14 +468,24 @@ def test_normal_safe_response_is_accepted_not_forced_to_fallback() -> None:
     assert len(entry.recommended_actions_tr) == 3
 
 
-def test_safe_negated_phrasing_is_not_rejected() -> None:
+def test_negated_phrasing_is_rejected_too() -> None:
+    """There is no negation exception.
+
+    A nearby negator is not reliable evidence that a forbidden term is being
+    denied - "not merely scanned but compromised" is an affirmative claim - so
+    the vocabulary is refused outright. The prompt already tells the model
+    never to use these words, so a compliant answer is unaffected.
+    """
     selection, _ = _selection([DOCKER_EXPOSURE])
     items = selection.all_items
     for text in (
+        "The host was not merely scanned but compromised.",
+        "The system was not only probed but exploited.",
+        "Not initially affected, the host was later compromised.",
+        "Nothing was blocked here. The attacker compromised the host.",
+        "No alerts fired, yet malware was installed.",
         "The firewall permitted the traffic; this does not prove compromise.",
         "Nothing observed proves exploitation of the service.",
-        "This is not evidence of malware on the host.",
-        "No compromise was proven by these records.",
     ):
         payload = {
             "items": [
@@ -488,11 +499,46 @@ def test_safe_negated_phrasing_is_not_rejected() -> None:
             ]
         }
         accepted, rejected = validate_enrichment_payload(payload, items)
-        assert not rejected, (text, rejected)
-        assert len(accepted) == 1
+        assert rejected.get(items[0].item_id) == "unsupported_claim", text
+        assert accepted == ()
 
 
-def test_affirmative_claims_are_still_rejected_after_negation_support() -> None:
+def test_evidence_limits_can_be_described_without_forbidden_words() -> None:
+    """A compliant answer can still be honest about what is unproven."""
+    selection, _ = _selection([DOCKER_EXPOSURE])
+    items = selection.all_items
+    payload = {
+        "items": [
+            {
+                "item_id": items[0].item_id,
+                "explanation_en": (
+                    "The firewall permitted the connection attempt. The "
+                    "records describe network reachability only and say "
+                    "nothing about what the service did next."
+                ),
+                "explanation_tr": (
+                    "Güvenlik duvarı bağlantı denemesine izin verdi. Kayıtlar "
+                    "yalnızca ağ erişilebilirliğini gösterir ve servisin "
+                    "sonrasında ne yaptığı hakkında bilgi vermez."
+                ),
+                "recommended_actions_en": [
+                    "Confirm whether this exposure is intended.",
+                    "Review host-side records for the same window.",
+                ],
+                "recommended_actions_tr": [
+                    "Bu açığın amaçlanıp amaçlanmadığını doğrulayın.",
+                    "Aynı zaman aralığı için sunucu kayıtlarını inceleyin.",
+                ],
+            }
+        ]
+    }
+    accepted, rejected = validate_enrichment_payload(payload, items)
+    assert not rejected
+    assert len(accepted) == 1
+    assert accepted[0].deterministic_fallback is False
+
+
+def test_affirmative_claims_are_still_rejected() -> None:
     selection, _ = _selection([DOCKER_EXPOSURE])
     items = selection.all_items
     for text in (
