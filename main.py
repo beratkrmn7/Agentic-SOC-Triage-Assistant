@@ -36,7 +36,36 @@ def _print_routing_summary(result) -> None:
         console.print(f"  {digest.get('statement', '')}")
 
 
-def _print_incident_state(inc_state: IncidentState) -> None:
+def _matching_enrichment(result, incident_id: str, lang: str):
+    """The persisted enrichment text covering one incident, if any.
+
+    An incident may be represented in the brief by itself or by a group, so
+    the lookup goes through the selection's member incident IDs rather than
+    assuming a one-to-one mapping.
+    """
+    selection = getattr(result, "brief_selection", None)
+    enrichment = getattr(result, "brief_enrichment", None)
+    if selection is None or enrichment is None:
+        return None
+    for item in selection.all_items:
+        if incident_id in item.member_incident_ids:
+            entry = enrichment.for_item(item.item_id)
+            if entry is None:
+                return None
+            return (
+                entry.explanation_tr if lang == "tr" else entry.explanation_en,
+                list(
+                    entry.recommended_actions_tr
+                    if lang == "tr"
+                    else entry.recommended_actions_en
+                ),
+            )
+    return None
+
+
+def _print_incident_state(
+    inc_state: IncidentState, result=None, *, lang: str = "en"
+) -> None:
     console.print(f"\n[bold cyan]--- FINAL STATE ({inc_state.get('incident_id', 'unknown')}) ---[/bold cyan]")
     route = inc_state.get('triage_route', 'individual_triage')
     console.print(f"[bold]Route:[/bold] {route}")
@@ -47,6 +76,18 @@ def _print_incident_state(inc_state: IncidentState) -> None:
     detection_confidence = inc_state.get('detection_confidence')
     if detection_confidence is not None:
         console.print(f"[bold]Detection confidence score:[/bold] {detection_confidence:.2f}")
+    if inc_state.get('evidence_strength'):
+        console.print(f"[bold]Evidence strength:[/bold] {inc_state['evidence_strength']}")
+
+    enriched = _matching_enrichment(
+        result, str(inc_state.get('incident_id', '')), lang
+    ) if result is not None else None
+    if enriched:
+        explanation, actions = enriched
+        if explanation:
+            console.print(f"\n[bold]Why it matters:[/bold] {explanation}")
+        for action in actions:
+            console.print(f"  - {action}")
 
     if inc_state.get('final_report'):
         console.print("\n")
@@ -102,6 +143,7 @@ def analyze_file(
     *,
     isolated: bool = False,
     report_mode: str = "brief",
+    lang: str = "en",
 ):
     console.print(f"[bold blue]Starting File Analysis: {file_path}[/bold blue]")
 
@@ -114,9 +156,11 @@ def analyze_file(
     )
 
     if report_mode == "full":
+        # Full mode reuses the same persisted analysis as brief mode: the same
+        # job, the same deterministic facts, and the same enrichment text.
         _print_analysis_summary(result)
         for inc_state in result.incidents:
-            _print_incident_state(inc_state)
+            _print_incident_state(inc_state, result, lang=lang)
         _print_routing_summary(result)
         return result
 
@@ -149,6 +193,9 @@ def analyze_file(
         provider_call_count=int(
             (result.routing_metrics or {}).get("provider_invocation_count", 0)
         ),
+        selection=result.brief_selection,
+        enrichment=result.brief_enrichment,
+        lang="tr" if lang == "tr" else "en",
     )
     return result
 
@@ -296,6 +343,16 @@ if __name__ == "__main__":
         help="Analyze output format (default: brief)",
     )
     parser.add_argument(
+        "--lang",
+        choices=("en", "tr"),
+        default="en",
+        help=(
+            "Brief language (default: en). Presentation only: both languages "
+            "come from the same persisted enrichment, so switching never "
+            "triggers another provider call."
+        ),
+    )
+    parser.add_argument(
         "--isolated",
         action="store_true",
         help="Disable cross-job correlation for this analysis",
@@ -311,6 +368,7 @@ if __name__ == "__main__":
             args.file,
             isolated=args.isolated,
             report_mode=args.report,
+            lang=args.lang,
         )
     else:
         run_mock_test()

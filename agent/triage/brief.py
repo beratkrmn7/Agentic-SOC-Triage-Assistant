@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from rich.console import Console
 from rich.panel import Panel
@@ -13,12 +14,18 @@ from rich.text import Text
 from agent.detection.detectors.exposure_helpers import (
     effective_destination_ip,
     effective_destination_port,
+    is_critical_management_port,
 )
-from agent.detection.detectors.scan_helpers import is_allowed
-from agent.detection.models import IncidentBundle
-from agent.detection.rollup import RollupResult
+from agent.detection.presentation import BriefActionItem, BriefSelection
+from agent.detection.rollup import ExposedAsset, RollupResult
 from agent.schema import CanonicalLogEvent
-from agent.triage.provenance import format_event_provenance
+from agent.triage.attack_context import derive_attack_context, render_attack_context
+from agent.triage.disposition import (
+    EVIDENCE_STRENGTH_RANK,
+    EvidenceStrength,
+    classify_evidence_strength,
+)
+from agent.triage.enrichment import BriefEnrichmentResult
 
 
 MAX_BRIEF_EVIDENCE_IDS = 3
@@ -76,90 +83,228 @@ def _in_source_timezone(value: datetime, source_timezone: timezone) -> datetime:
     return value.astimezone(source_timezone)
 
 
-def _incident_events(
-    incident: IncidentBundle,
+def _asset_evidence_strength(
+    rollup: RollupResult,
     event_lookup: Mapping[str, CanonicalLogEvent],
-) -> list[CanonicalLogEvent]:
-    return [
-        event_lookup[event_id]
-        for event_id in incident.event_ids
-        if event_id in event_lookup
-    ]
+) -> dict[str, EvidenceStrength]:
+    """Deterministic evidence strength per exposed destination."""
+    by_destination: dict[str, list[CanonicalLogEvent]] = {}
+    for event in event_lookup.values():
+        destination = effective_destination_ip(event)
+        if destination:
+            by_destination.setdefault(destination, []).append(event)
+    return {
+        asset.effective_destination_ip: classify_evidence_strength(
+            [
+                event
+                for event in by_destination.get(asset.effective_destination_ip, [])
+                if effective_destination_port(event) in set(asset.ports)
+            ]
+        )
+        for asset in rollup.exposed_assets
+    }
 
 
-def _incident_evidence_ids(incident: IncidentBundle) -> str:
-    ids = [item.event_id for item in incident.evidence]
-    if not ids:
-        ids = list(incident.event_ids)
-    bounded = sorted(set(ids))[:MAX_BRIEF_EVIDENCE_IDS]
-    return ", ".join(bounded) or "none"
-
-
-def _incident_flow(
-    incident: IncidentBundle,
-    event_lookup: Mapping[str, CanonicalLogEvent],
-) -> str:
-    events = _incident_events(incident, event_lookup)
-    sources = sorted({event.src_ip for event in events if event.src_ip})
-    destinations = sorted(
-        {
-            destination
-            for event in events
-            if (destination := effective_destination_ip(event))
-        }
+def _asset_priority(asset: ExposedAsset, strength: EvidenceStrength) -> str:
+    critical_management = is_critical_management_port(
+        asset.ports[0] if asset.ports else None
     )
-    ports = sorted(
-        {
-            port
-            for event in events
-            if (port := effective_destination_port(event)) is not None
-        }
+    if critical_management:
+        return "P1" if strength in _STRONG_STRENGTHS else "P2"
+    return "P2" if strength not in _WEAK_STRENGTHS else "P3"
+
+
+def _asset_risk_key(
+    asset: ExposedAsset, strengths: Mapping[str, EvidenceStrength]
+) -> tuple:
+    strength = strengths.get(
+        asset.effective_destination_ip, EvidenceStrength.SYN_ONLY
     )
-    source_text = ", ".join(sources[:2]) or "unknown source"
-    destination_text = ", ".join(destinations[:2]) or incident.primary_entity
-    port_text = ",".join(str(port) for port in ports[:6]) or "unknown port"
-    allowed = sum(1 for event in events if is_allowed(event))
-    action_text = "ALLOWED" if allowed else "BLOCKED/MIXED"
-    return f"{source_text} -> {destination_text}:{port_text} · {action_text}"
+    return (
+        _asset_priority(asset, strength),
+        -EVIDENCE_STRENGTH_RANK[strength],
+        -asset.distinct_external_source_count,
+        asset.effective_destination_ip,
+    )
 
 
-def _next_action(incident: IncidentBundle) -> str:
-    if incident.incident_family in {"firewall_exposure", "firewall_policy"}:
-        return "Confirm firewall intent; restrict external access; review service logs."
-    if incident.incident_family == "network_intrusion_candidate":
-        return "Validate the policy transition; review the destination service timeline."
-    return "Review the bounded evidence and verify the affected source/target scope."
+_STRONG_STRENGTHS = frozenset(
+    {
+        EvidenceStrength.BIDIRECTIONAL_TRANSPORT,
+        EvidenceStrength.APPLICATION_EVIDENCE,
+    }
+)
+_WEAK_STRENGTHS = frozenset(
+    {EvidenceStrength.SYN_ONLY, EvidenceStrength.SINGLE_PACKET_NON_SYN}
+)
+
+Language = Literal["en", "tr"]
+
+_LABELS = {
+    "en": {
+        "priority": "Priority",
+        "what": "What happened / observed flow",
+        "events": "Events",
+        "why": "Why it matters / next steps",
+        "empty": "No items in this section.",
+        "evidence": "Evidence",
+        "strength": "Evidence strength",
+        "members": "Grouped canonical incidents",
+        "destinations": "destination(s)",
+        "shared": "Applies to every item above",
+        "no_attack": "ATT&CK context: insufficient behavioral evidence",
+        "review": "NEEDS REVIEW",
+    },
+    "tr": {
+        "priority": "Öncelik",
+        "what": "Ne oldu / gözlenen akış",
+        "events": "Olaylar",
+        "why": "Neden önemli / sonraki adımlar",
+        "empty": "Bu bölümde öğe yok.",
+        "evidence": "Kanıt",
+        "strength": "Kanıt gücü",
+        "members": "Gruplanan kanonik olaylar",
+        "destinations": "hedef",
+        "shared": "Yukarıdaki tüm öğeler için geçerli",
+        "no_attack": "ATT&CK bağlamı: yeterli davranışsal kanıt yok",
+        "review": "İNCELEME GEREKLİ",
+    },
+}
+
+
+def _priority(severity: str) -> str:
+    if severity == "critical":
+        return "P1"
+    if severity == "high":
+        return "P2"
+    if severity == "medium":
+        return "P3"
+    return "P4"
+
+
+def _item_flow(item: BriefActionItem, labels: dict[str, str]) -> str:
+    sources = list(item.source_ips[:2])
+    source_text = ", ".join(sources) or "unknown source"
+    if item.source_count > len(sources):
+        source_text += f" (+{item.source_count - len(sources)})"
+    destinations = list(item.effective_destinations[:2])
+    destination_text = ", ".join(destinations) or "unknown destination"
+    port_text = ",".join(str(port) for port in item.ports[:6]) or "unknown port"
+    if item.allowed_event_count and item.blocked_event_count:
+        action_text = (
+            f"{item.allowed_event_count} ALLOWED / {item.blocked_event_count} BLOCKED"
+        )
+    elif item.allowed_event_count:
+        action_text = "ALLOWED"
+    else:
+        action_text = "BLOCKED"
+    nat_text = " · NAT" if item.nat_observed else ""
+    return (
+        f"{source_text} -> {destination_text}:{port_text} · {action_text}{nat_text}\n"
+        f"{item.destination_count} {labels['destinations']}"
+    )
+
+
+def _item_attack_context(item: BriefActionItem) -> str:
+    context = derive_attack_context(
+        incident_family=item.incident_family,
+        service=item.service,
+        evidence_strength=item.evidence_strength,
+        distinct_port_count=len(item.ports),
+        distinct_destination_count=item.destination_count,
+    )
+    return render_attack_context(context)
+
+
+def _shared_actions(
+    items: Sequence[BriefActionItem],
+    enrichment: BriefEnrichmentResult | None,
+    lang: Language,
+) -> list[str]:
+    """Actions every row repeats, so they can be shown once per section."""
+    if enrichment is None or len(items) < 2:
+        return []
+    per_item: list[set[str]] = []
+    for item in items:
+        entry = enrichment.for_item(item.item_id)
+        if entry is None:
+            return []
+        actions = (
+            entry.recommended_actions_tr if lang == "tr" else entry.recommended_actions_en
+        )
+        per_item.append(set(actions))
+    if not per_item:
+        return []
+    shared = set.intersection(*per_item)
+    # Only pull an action out of the rows if something row-specific remains.
+    if any(len(actions - shared) == 0 for actions in per_item):
+        return []
+    return sorted(shared)
 
 
 def _action_table(
     title: str,
-    incidents: Sequence[IncidentBundle],
-    event_lookup: Mapping[str, CanonicalLogEvent],
+    items: Sequence[BriefActionItem],
+    enrichment: BriefEnrichmentResult | None,
+    lang: Language,
+    shared: Sequence[str] = (),
 ) -> Table:
+    labels = _LABELS[lang]
     table = Table(title=title, expand=True, show_lines=True)
-    table.add_column("Priority", no_wrap=True)
-    table.add_column("Incident / observed flow", ratio=3)
-    table.add_column("Events", no_wrap=True)
-    table.add_column("Evidence / next", ratio=3)
-    for incident in incidents:
-        priority = "P1" if incident.severity == "critical" else (
-            "P2" if incident.severity == "high" else "P3"
+    table.add_column(labels["priority"], no_wrap=True)
+    table.add_column(labels["what"], ratio=3)
+    table.add_column(labels["events"], no_wrap=True)
+    table.add_column(labels["why"], ratio=3)
+
+    for item in items:
+        priority = _priority(item.severity)
+        severity_text = item.severity.upper()
+        if item.verdict == "needs_review":
+            severity_text = f"{severity_text}\n{labels['review']}"
+        event_summary = str(item.event_count)
+        if item.packet_count:
+            event_summary += f"\n{item.packet_count} pkt"
+
+        entry = enrichment.for_item(item.item_id) if enrichment else None
+        if entry is not None:
+            explanation = (
+                entry.explanation_tr if lang == "tr" else entry.explanation_en
+            )
+            actions = list(
+                entry.recommended_actions_tr
+                if lang == "tr"
+                else entry.recommended_actions_en
+            )
+        else:
+            explanation = ""
+            actions = []
+        actions = [action for action in actions if action not in set(shared)]
+
+        strength_text = (
+            item.evidence_strength.value if item.evidence_strength else "unknown"
         )
-        event_summary = format_event_provenance(
-            len(incident.event_ids), incident.metrics
-        )
-        mitre = ", ".join(incident.mitre_techniques) or "none mapped"
+        evidence_text = ", ".join(item.evidence_ids[:MAX_BRIEF_EVIDENCE_IDS]) or "none"
+        why_lines = [explanation] if explanation else []
+        why_lines.append(_item_attack_context(item))
+        why_lines.extend(f"- {action}" for action in actions)
+        why_lines.append(f"{labels['evidence']}: {evidence_text}")
+
+        what_lines = [item.title, _item_flow(item, labels)]
+        what_lines.append(f"{labels['strength']}: {strength_text}")
+        if item.member_incident_count > 1:
+            what_lines.append(
+                f"{labels['members']}: {item.member_incident_count}"
+            )
+
         table.add_row(
-            f"[{priority}]\n{incident.severity.upper()}\nconf {incident.confidence:.2f}",
-            f"{incident.title}\n{_incident_flow(incident, event_lookup)}",
+            f"[{priority}]\n{severity_text}\nconf {item.confidence:.2f}",
+            "\n".join(what_lines),
             event_summary,
-            (
-                f"Evidence: {_incident_evidence_ids(incident)}\n"
-                f"ATT&CK: {mitre}\nNext: {_next_action(incident)}"
-            ),
+            "\n".join(why_lines),
         )
-    if not incidents:
-        table.add_row("-", "No items in this section.", "0", "-")
+
+    if not items:
+        table.add_row("-", labels["empty"], "0", "-")
     return table
 
 
@@ -171,9 +316,17 @@ def render_soc_brief(
     source_name: str,
     job_id: str | None,
     provider_call_count: int,
+    selection: BriefSelection | None = None,
+    enrichment: BriefEnrichmentResult | None = None,
+    lang: Language = "en",
     generated_at: datetime | None = None,
 ) -> None:
-    """Render a concise deterministic brief without invoking any provider."""
+    """Render the brief from deterministic rows plus persisted enrichment text.
+
+    Provider-free by construction: it receives the deterministic rollup, the
+    deterministic selection and an already-persisted enrichment artifact, and
+    only chooses which language to display. Rendering never triggers a call.
+    """
     generated_at = generated_at or datetime.now().astimezone()
     timestamps = sorted(
         event.timestamp for event in event_lookup.values() if event.timestamp is not None
@@ -211,9 +364,12 @@ def render_soc_brief(
             style="bold",
         )
     )
+    act_now_items = selection.act_now if selection is not None else ()
+    investigate_items = selection.investigate if selection is not None else ()
+
     summary = (
-        f"{len(rollup.act_now)} high-priority item(s), "
-        f"{len(rollup.investigate)} investigation item(s), "
+        f"{len(act_now_items)} high-priority item(s), "
+        f"{len(investigate_items)} investigation item(s), "
         f"{len(rollup.recon_groups)} fully blocked reconnaissance group(s), and "
         f"{len(rollup.exposed_assets)} exposed asset/service row(s). "
         "Firewall pass proves policy exposure only; it does not prove authentication, "
@@ -221,8 +377,20 @@ def render_soc_brief(
     )
     console.print(Panel(summary, title="ANALYST SUMMARY", border_style="yellow"))
 
-    console.print(_action_table("§1 ACT NOW", rollup.act_now, event_lookup))
-    console.print(_action_table("§2 INVESTIGATE", rollup.investigate, event_lookup))
+    for title, items in (
+        ("§1 ACT NOW", act_now_items),
+        ("§2 INVESTIGATE", investigate_items),
+    ):
+        shared = _shared_actions(items, enrichment, lang)
+        console.print(_action_table(title, items, enrichment, lang, shared))
+        if shared:
+            # Shown once instead of repeated on every row above.
+            console.print(
+                Text(
+                    f"{_LABELS[lang]['shared']}: " + " | ".join(shared),
+                    style="dim",
+                )
+            )
 
     recon = Table(title="§3 BLOCKED — FYI", expand=True)
     recon.add_column("Source scope")
@@ -233,8 +401,14 @@ def render_soc_brief(
     recon.add_column("Events", justify="right")
     for group in rollup.recon_groups:
         ports = ",".join(str(port) for port in group.ports[:8]) or "none"
+        # A single contributing source is shown as its exact address; a CIDR
+        # is only honest when several exact sources are actually present.
+        if group.source_count == 1 and group.representative_sources:
+            source_text = group.representative_sources[0]
+        else:
+            source_text = group.source_cidr
         recon.add_row(
-            group.source_cidr,
+            source_text,
             f"{group.incident_family} / {group.service_scope}",
             str(group.source_count),
             str(group.distinct_target_count),
@@ -262,11 +436,18 @@ def render_soc_brief(
     console.print(suppressed)
 
     assets = Table(title="§5 EXPOSED ASSET INVENTORY", expand=True)
+    assets.add_column("Priority", no_wrap=True)
     assets.add_column("Effective destination")
     assets.add_column("Service / ports")
+    assets.add_column("Evidence strength")
     assets.add_column("Sources", justify="right")
     assets.add_column("NAT / public destination")
-    for exposed_asset in rollup.exposed_assets[:MAX_BRIEF_ASSETS]:
+    asset_strength = _asset_evidence_strength(rollup, event_lookup)
+    ordered_assets = sorted(
+        rollup.exposed_assets,
+        key=lambda asset: _asset_risk_key(asset, asset_strength),
+    )
+    for exposed_asset in ordered_assets[:MAX_BRIEF_ASSETS]:
         nat_text = "no NAT"
         if exposed_asset.nat_observed:
             public = (
@@ -277,15 +458,20 @@ def render_soc_brief(
                 f"{public} -> "
                 f"{exposed_asset.internal_address or exposed_asset.effective_destination_ip}"
             )
+        strength = asset_strength.get(
+            exposed_asset.effective_destination_ip, EvidenceStrength.SYN_ONLY
+        )
         assets.add_row(
+            _asset_priority(exposed_asset, strength),
             exposed_asset.effective_destination_ip,
             f"{exposed_asset.service} / "
             f"{','.join(str(port) for port in exposed_asset.ports)}",
+            strength.value,
             str(exposed_asset.distinct_external_source_count),
             nat_text,
         )
     if not rollup.exposed_assets:
-        assets.add_row("-", "No exposed sensitive services", "0", "-")
+        assets.add_row("-", "-", "No exposed sensitive services", "-", "0", "-")
     console.print(assets)
     if len(rollup.exposed_assets) > MAX_BRIEF_ASSETS:
         console.print(

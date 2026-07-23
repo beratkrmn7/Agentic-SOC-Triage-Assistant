@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import uuid
 from dataclasses import replace
@@ -25,9 +26,9 @@ from agent.detection.config import DetectionSettings
 from agent.detection.engine import DetectionEngine
 from agent.detection.models import IncidentBundle
 from agent.models import IncidentState
-from agent.graph import app
 from agent.triage.models import TriageIncidentContext
 from agent.triage.routing import (
+    BATCH_ENRICHMENT_ROUTE,
     DETERMINISTIC_TRIAGE_VERDICT,
     DigestMember,
     RoutingDecision,
@@ -556,6 +557,12 @@ class AnalysisService:
                     if triage_incident:
                         self._persist_triage_outputs(uow, job, inc_state, triage_incident)
 
+            # 7.4 Job-level brief enrichment artifact (never an incident report).
+            if run_triage and result.brief_enrichment is not None:
+                self._persist_brief_enrichment_artifact(
+                    uow, job, result.brief_enrichment
+                )
+
             # 7.5 OpenSearch Outbox Enqueue
             SearchOutboxService(
                 uow.session,
@@ -929,6 +936,26 @@ class AnalysisService:
                 ]
                 routing_metrics["digest_count"] = len(result.triage_digests)
 
+                # T-A: one bounded batch enrichment for the whole job, after
+                # every canonical incident, disposition and presentation group
+                # exists. This is the only provider call an analyze job makes.
+                # Detect mode never reaches it, keeping detect and ingest at
+                # zero provider calls and zero artifacts.
+                if run_triage:
+                    eligible_ids = frozenset(
+                        str(state.get("incident_id"))
+                        for state in incident_states
+                        if state.get("triage_route") == BATCH_ENRICHMENT_ROUTE
+                    )
+                    self._enrich_and_persist_brief(
+                        uow,
+                        job,
+                        result,
+                        final_incidents_domain,
+                        routing_metrics,
+                        eligible_ids,
+                    )
+
                 # Phase 12: enqueue final canonical/fallback projections once.
                 SearchOutboxService(
                     uow.session, uow.search_index_outbox, settings
@@ -981,6 +1008,159 @@ class AnalysisService:
             }
         )
         return result
+
+    def _build_brief_selection(
+        self,
+        result: AnalysisResult,
+        incidents: Sequence[IncidentBundle],
+        eligible_incident_ids: Optional[frozenset[str]] = None,
+    ) -> Any:
+        """Select the deterministic ACT NOW / INVESTIGATE rows for the brief."""
+        from agent.detection.fixed_source_port_cluster import (
+            FixedSourcePortCluster,
+            build_fixed_source_port_clusters,
+        )
+        from agent.detection.detectors.exposure_helpers import (
+            SENSITIVE_SERVICE_PORTS,
+            is_explicit_wan_zone,
+        )
+        from agent.detection.detectors.scan_helpers import (
+            find_fixed_source_port_groups,
+        )
+        from agent.detection.presentation import build_brief_selection
+        from agent.detection.rollup import MAX_ACTION_ITEMS_PER_SECTION
+
+        settings = self.detection_engine.settings
+        clusters: tuple[FixedSourcePortCluster, ...] = ()
+        if getattr(settings, "FIXED_SOURCE_PORT_SCAN_ENABLED", False):
+            groups = find_fixed_source_port_groups(
+                list(result.event_map.values()),
+                source_ports=settings.FIXED_SOURCE_PORT_SCAN_PORTS,
+                min_events=(
+                    settings.FIXED_SOURCE_PORT_CLUSTER_MIN_EVENTS_PER_SOURCE
+                ),
+                min_distinct_destination_ports=(
+                    settings.FIXED_SOURCE_PORT_SCAN_MIN_DISTINCT_PORTS
+                ),
+                window_seconds=settings.FIXED_SOURCE_PORT_SCAN_WINDOW_SECONDS,
+                is_external_inbound=lambda event: is_explicit_wan_zone(
+                    event.inbound_zone
+                ),
+            )
+            clusters = build_fixed_source_port_clusters(
+                groups,
+                min_sources=settings.FIXED_SOURCE_PORT_CLUSTER_MIN_SOURCES,
+                min_events_per_source=(
+                    settings.FIXED_SOURCE_PORT_CLUSTER_MIN_EVENTS_PER_SOURCE
+                ),
+                min_total_events=(
+                    settings.FIXED_SOURCE_PORT_CLUSTER_MIN_TOTAL_EVENTS
+                ),
+                window_seconds=settings.FIXED_SOURCE_PORT_CLUSTER_WINDOW_SECONDS,
+                sensitive_ports=SENSITIVE_SERVICE_PORTS,
+            )
+
+        return build_brief_selection(
+            list(incidents),
+            result.event_map,
+            eligible_incident_ids=eligible_incident_ids,
+            scan_clusters=clusters,
+            max_items_per_section=MAX_ACTION_ITEMS_PER_SECTION,
+        )
+
+    @staticmethod
+    def _load_brief_enrichment(job: IngestionJob) -> Any:
+        """Reload the persisted enrichment artifact for a completed job.
+
+        Returns None when the job predates the artifact or stored something
+        unreadable; the renderer then uses deterministic text. Never calls a
+        provider.
+        """
+        from agent.triage.enrichment import REPORT_FORMAT, deserialize_result
+
+        for report in job.reports:
+            if str(report.format) == REPORT_FORMAT:
+                return deserialize_result(str(report.content or ""))
+        return None
+
+    def _enrich_and_persist_brief(
+        self,
+        uow: UnitOfWork,
+        job: IngestionJob,
+        result: AnalysisResult,
+        incidents: Sequence[IncidentBundle],
+        routing_metrics: Dict[str, int],
+        eligible_incident_ids: frozenset[str],
+    ) -> None:
+        """Run the one batch enrichment call and persist it as a job artifact.
+
+        The artifact is a job-scoped Report row: ``incident_id`` and
+        ``triage_run_id`` are NULL so it can never be mistaken for an
+        incident's own report, and a deterministic ``report_id`` keyed on the
+        job and schema version means at most one artifact exists per job.
+        """
+        from agent.application.brief_enrichment_service import enrich_brief_items
+
+        selection = self._build_brief_selection(
+            result, incidents, eligible_incident_ids
+        )
+        result.brief_selection = selection
+
+        enrichment = enrich_brief_items(
+            selection.all_items,
+            llm_enabled=self.llm_enabled,
+        )
+        result.brief_enrichment = enrichment
+        routing_metrics["provider_invocation_count"] = (
+            enrichment.provider_invocation_count
+        )
+        routing_metrics["provider_retry_count"] = enrichment.provider_retry_count
+
+        self._persist_brief_enrichment_artifact(uow, job, enrichment)
+
+    @staticmethod
+    def _persist_brief_enrichment_artifact(
+        uow: UnitOfWork, job: IngestionJob, enrichment: Any
+    ) -> None:
+        """Write (or refresh) the single job-scoped enrichment artifact."""
+        from agent.triage.enrichment import (
+            ENRICHMENT_SCHEMA_VERSION,
+            REPORT_FORMAT,
+            serialize_result,
+        )
+
+        if not getattr(enrichment, "items", ()):
+            return
+
+        assert uow.session is not None
+        content = serialize_result(enrichment)
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        # One deterministic ID per job and schema version, so the unique index
+        # on report_id enforces "at most one artifact per job" without a
+        # migration.
+        report_id = f"{ENRICHMENT_SCHEMA_VERSION}:{job.id}"
+        existing = (
+            uow.session.query(Report).filter_by(report_id=report_id).one_or_none()
+        )
+        if existing is not None:
+            existing.content = content  # type: ignore[assignment]
+            existing.content_sha256 = digest  # type: ignore[assignment]
+            return
+
+        uow.reports.add(
+            Report(
+                report_id=report_id,
+                job_id=job.id,
+                incident_id=None,
+                triage_run_id=None,
+                format=REPORT_FORMAT,
+                content=content,
+                content_sha256=digest,
+                entities={},
+                recommended_actions=[],
+                mitre_techniques=[],
+            )
+        )
 
     def _route_and_triage_final(
         self,
@@ -1035,58 +1215,30 @@ class AnalysisService:
         # incident keeps its status on a re-triage.
         allow_transition = str(row.status) == "new"
 
-        if decision.route == "individual_triage":
+        if decision.route == BATCH_ENRICHMENT_ROUTE:
+            # Batch-enrichment eligible: this incident gets its own brief row
+            # and is described by the single job-level enrichment call made
+            # later. No provider is called for it individually, so its own
+            # llm_invoked stays False and its verdict stays deterministic.
             routing_metrics["individual_triage_count"] += 1
-            if not self.llm_enabled:
-                initial_state["llm_invoked"] = False
-                initial_state["incident_type"] = bundle.incident_type
-                if disposition is None:
-                    # Only incidents without a deterministic disposition are
-                    # genuinely unreviewed when no provider is available. An
-                    # exposure keeps its deterministic verdict and severity.
-                    initial_state["triage_verdict"] = "needs_review"
-                    initial_state["review_reason"] = "provider_unavailable"
-                    initial_state["severity"] = "none"
-                    initial_state["confidence_score"] = 0.0
-                self._persist_triage_outputs(
-                    uow,
-                    job,
-                    initial_state,
-                    row,
-                    allow_lifecycle_transition=allow_transition,
-                )
-                return initial_state
-            routing_metrics["provider_invocation_count"] += 1
-            try:
-                self._raise_if_cancelled(job_id)
-                final_state = cast(IncidentState, app.invoke(initial_state))
-                self._raise_if_cancelled(job_id)
-                _annotate_routing(final_state, decision, bundle.confidence)
-                # The deterministic exposure disposition always wins over any
-                # provider-chosen verdict, severity or evidence selection.
-                _apply_exposure_disposition(bundle, incident_events, final_state)
-                self._persist_triage_outputs(
-                    uow, job, final_state, row,
-                    allow_lifecycle_transition=allow_transition,
-                )
-                return final_state
-            except JobCancellationRequested:
-                raise
-            except Exception as e:
-                logger.error(
-                    "Error during triage",
-                    exc_info=False,
-                    extra={
-                        "error": type(e).__name__,
-                        "error_msg": str(e),
-                        "incident_id": initial_state.get("incident_id"),
-                    },
-                )
-                self._persist_triage_outputs(
-                    uow, job, initial_state, row,
-                    allow_lifecycle_transition=allow_transition,
-                )
-                return initial_state
+            initial_state["llm_invoked"] = False
+            initial_state["incident_type"] = bundle.incident_type
+            if disposition is None:
+                initial_state["severity"] = bundle.severity
+                initial_state["confidence_score"] = bundle.confidence
+                initial_state["triage_verdict"] = DETERMINISTIC_TRIAGE_VERDICT
+            initial_state["final_report"] = generate_deterministic_report(
+                bundle, incident_events
+            )
+            initial_state["iteration_count"] = 0
+            self._persist_triage_outputs(
+                uow,
+                job,
+                initial_state,
+                row,
+                allow_lifecycle_transition=allow_transition,
+            )
+            return initial_state
 
         # Deterministic-origin routes below never call a provider.
         initial_state["incident_type"] = bundle.incident_type
@@ -1322,7 +1474,23 @@ class AnalysisService:
                             for incident_type, members in sorted(digest_groups.items())
                         ]
                         routing_metrics["digest_count"] = len(result.triage_digests)
+                        # A completed-job replay is served entirely from
+                        # persistence: the stored bilingual enrichment is
+                        # reloaded and no provider is invoked.
+                        routing_metrics["provider_invocation_count"] = 0
+                        routing_metrics["provider_retry_count"] = 0
                         result.routing_metrics = routing_metrics
+                        replay_eligible_ids = frozenset(
+                            str(state.get("incident_id"))
+                            for state in result.incidents
+                            if state.get("triage_route") == BATCH_ENRICHMENT_ROUTE
+                        )
+                        result.brief_selection = self._build_brief_selection(
+                            result,
+                            result.detection_result.incidents,
+                            replay_eligible_ids,
+                        )
+                        result.brief_enrichment = self._load_brief_enrichment(job)
 
                         return result
                 else:
@@ -1454,34 +1622,20 @@ class AnalysisService:
             if disposition is not None:
                 _stash_disposition_in_incident_metrics(inc, disposition)
 
-            if decision.route == "individual_triage":
+            if decision.route == BATCH_ENRICHMENT_ROUTE:
+                # Batch-enrichment eligible; no per-incident provider call.
                 routing_metrics["individual_triage_count"] += 1
-                if not self.llm_enabled:
-                    initial_state["llm_invoked"] = False
-                    initial_state["incident_type"] = inc.incident_type
-                    if disposition is None:
-                        # Non-exposure incidents have no deterministic
-                        # disposition, so an unavailable provider genuinely
-                        # leaves them unreviewed.
-                        initial_state["triage_verdict"] = "needs_review"
-                        initial_state["review_reason"] = "provider_unavailable"
-                        initial_state["severity"] = "none"
-                        initial_state["confidence_score"] = 0.0
-                    result.incidents.append(initial_state)
-                    continue
-                routing_metrics["provider_invocation_count"] += 1
-                try:
-                    self._raise_if_cancelled(job_id)
-                    final_state = cast(IncidentState, app.invoke(initial_state))
-                    self._raise_if_cancelled(job_id)
-                    _annotate_routing(final_state, decision, inc.confidence)
-                    _apply_exposure_disposition(inc, incident_events, final_state)
-                    result.incidents.append(final_state)
-                except JobCancellationRequested:
-                    raise
-                except Exception as e:
-                    logger.error("Error during triage", exc_info=False, extra={"error": type(e).__name__, "error_msg": str(e), "incident_id": initial_state.get("incident_id")})
-                    result.incidents.append(initial_state)
+                initial_state["llm_invoked"] = False
+                initial_state["incident_type"] = inc.incident_type
+                if disposition is None:
+                    initial_state["severity"] = inc.severity
+                    initial_state["confidence_score"] = inc.confidence
+                    initial_state["triage_verdict"] = DETERMINISTIC_TRIAGE_VERDICT
+                initial_state["final_report"] = generate_deterministic_report(
+                    inc, incident_events
+                )
+                initial_state["iteration_count"] = 0
+                result.incidents.append(initial_state)
                 continue
 
             # Deterministic-origin routes below never call a provider.
@@ -1517,6 +1671,31 @@ class AnalysisService:
             for incident_type, members in sorted(digest_groups.items())
         ]
         routing_metrics["digest_count"] = len(result.triage_digests)
+
+        if run_triage:
+            # The legacy batch-local path makes the same single batch call as
+            # the stateful path, so provider-call semantics do not depend on
+            # which pipeline ran.
+            from agent.application.brief_enrichment_service import enrich_brief_items
+
+            eligible_ids = frozenset(
+                str(state.get("incident_id"))
+                for state in result.incidents
+                if state.get("triage_route") == BATCH_ENRICHMENT_ROUTE
+            )
+            selection = self._build_brief_selection(
+                result, det_result.incidents, eligible_ids
+            )
+            result.brief_selection = selection
+            enrichment = enrich_brief_items(
+                selection.all_items, llm_enabled=self.llm_enabled
+            )
+            result.brief_enrichment = enrichment
+            routing_metrics["provider_invocation_count"] = (
+                enrichment.provider_invocation_count
+            )
+            routing_metrics["provider_retry_count"] = enrichment.provider_retry_count
+
         result.routing_metrics = routing_metrics
 
         # 6. Persistence
