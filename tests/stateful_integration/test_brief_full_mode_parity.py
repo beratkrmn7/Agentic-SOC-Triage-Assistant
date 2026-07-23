@@ -33,7 +33,11 @@ def test_brief_and_full_modes_reuse_one_job(
     settings = make_settings(enabled=True)
     _force_enrichment_eligible(monkeypatch)
     _patch_cli_factory(
-        monkeypatch, session_factory, settings, [campaign_job_a(), campaign_job_a()]
+        monkeypatch,
+        session_factory,
+        settings,
+        [campaign_job_a(), campaign_job_a()],
+        llm_enabled=True,
     )
 
     log_file = tmp_path / "a.jsonl"
@@ -83,6 +87,7 @@ def test_replay_renders_either_language_without_a_provider_call(
         session_factory,
         settings,
         [campaign_job_a(), campaign_job_a(), campaign_job_a()],
+        llm_enabled=True,
     )
 
     log_file = tmp_path / "a.jsonl"
